@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build && npm run bot:build",
-    "start": "next start",
+    "start": "bash start.sh",
     "lint": "eslint",
     "bot": "ts-node --project bot/tsconfig.json bot/trading-bot.ts",
     "bot:build": "tsc --project bot/tsconfig.json",
