@@ -1,2 +1,2 @@
 web: npm run start
-worker: npm run bot
+worker: node bot/dist/trading-bot.js

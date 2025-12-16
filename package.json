@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && npm run bot:build",
     "start": "next start",
     "lint": "eslint",
     "bot": "ts-node --project bot/tsconfig.json bot/trading-bot.ts",
