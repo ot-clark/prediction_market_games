@@ -466,6 +466,12 @@ function findClosestStrikeIV(
  * Get base URL for internal API calls
  */
 function getBaseUrl(request: Request): string {
+  // In production (Railway), use HTTP for internal calls to avoid SSL issues
+  // Railway's internal networking doesn't need SSL for localhost calls
+  if (process.env.NODE_ENV === 'production') {
+    const port = process.env.PORT || '3000';
+    return `http://localhost:${port}`;
+  }
   const url = new URL(request.url);
   return `${url.protocol}//${url.host}`;
 }
