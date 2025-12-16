@@ -9,6 +9,7 @@ interface ArbitrageApiResponse {
   totalSportsbookEvents: number;
   matchedEvents: number;
   error?: string;
+  remainingCredits?: number;
 }
 
 export default function ArbitrageDashboard() {

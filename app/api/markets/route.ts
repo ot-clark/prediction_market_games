@@ -147,7 +147,8 @@ async function fetchMarketsFromMCP(limit: number, active: boolean): Promise<Poly
 
       // Check if the tool result is an error
       if (toolResult.isError) {
-        const errorText = toolResult.content?.[0]?.text || 'Unknown error';
+        const content = toolResult.content as Array<{ text?: string }> | undefined;
+        const errorText = content?.[0]?.text || 'Unknown error';
         console.error('MCP tool returned error:', errorText);
         
         // If it's an authentication/hex error, throw to trigger fallback
@@ -254,7 +255,7 @@ async function fetchMarketsFromMCP(limit: number, active: boolean): Promise<Poly
       // Apply filters
       if (active) {
         markets = markets.filter(
-          (m) => m.acceptingOrders && !m.closed && !m.archived
+          (m) => m.acceptingOrders && !m.closed
         );
       }
 
