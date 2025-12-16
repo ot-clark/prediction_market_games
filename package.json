@@ -6,21 +6,29 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "bot": "ts-node --project bot/tsconfig.json bot/trading-bot.ts",
+    "bot:build": "tsc --project bot/tsconfig.json",
+    "bot:prod": "node bot/dist/trading-bot.js",
+    "bot:start": "pm2 start ecosystem.config.js --only paper-trader",
+    "bot:stop": "pm2 stop paper-trader",
+    "bot:logs": "pm2 logs paper-trader"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.24.3",
     "next": "16.0.7",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^20.19.27",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.0.7",
     "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
     "typescript": "^5"
   }
 }

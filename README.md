@@ -1,36 +1,108 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Polymarket Real-Time Data Dashboard
 
-## Getting Started
+A Next.js application that displays real-time Polymarket prediction market data including bids, asks, volume, liquidity, event names, and resolution dates in a tabular format.
 
-First, run the development server:
+## Features
+
+- Real-time Polymarket market data
+- Comprehensive table view with:
+  - Event names
+  - Bids and asks
+  - Spread calculations
+  - Volume and liquidity
+  - Resolution/expiry dates
+  - Market status
+- Auto-refresh every 30 seconds
+- Clean, modern UI with dark mode support
+
+## Setup
+
+### 1. Install Dependencies
+
+```bash
+npm install
+```
+
+### 2. Configure MCP Server
+
+The application uses the Polymarket MCP server to fetch data. You need to:
+
+1. **Set up the MCP server in Cursor** (or your MCP client):
+   
+   Add this to your Cursor settings (`~/.cursor/mcp.json` or similar):
+   
+   ```json
+   {
+     "mcpServers": {
+       "polymarket-mcp": {
+         "command": "uv",
+         "args": [
+           "--directory",
+           "/Users/{INSERT_USER}/YOUR/PATH/TO/polymarket-mcp",
+           "run",
+           "polymarket-mcp"
+         ],
+         "env": {
+           "KEY": "<insert polymarket api key>",
+           "FUNDER": "<insert polymarket wallet address>"
+         }
+       }
+     }
+   }
+   ```
+
+2. **Set Environment Variables**:
+   
+   Create a `.env.local` file in the project root:
+   
+   ```env
+   POLYMARKET_MCP_PATH=/Users/owenclark/polymarket-mcp
+   POLYMARKET_API_KEY=your_polymarket_api_key_here
+   POLYMARKET_FUNDER=your_polymarket_wallet_address_here
+   ```
+   
+   Or use `KEY` and `FUNDER` to match the MCP server configuration.
+
+### 3. Run Development Server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to see the dashboard.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `app/api/markets/route.ts` - API route that fetches data from MCP server
+- `components/MarketDashboard.tsx` - Main dashboard component
+- `components/MarketsTable.tsx` - Table component displaying market data
+- `types/polymarket.ts` - TypeScript types for Polymarket data
 
-## Learn More
+## API Endpoints
 
-To learn more about Next.js, take a look at the following resources:
+### GET `/api/markets`
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Fetches Polymarket market data.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**Query Parameters:**
+- `limit` (optional): Maximum number of markets to return (default: 100)
+- `active` (optional): Filter for active markets only (default: true)
 
-## Deploy on Vercel
+**Example:**
+```
+GET /api/markets?limit=50&active=true
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Technologies
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Next.js 16
+- React 19
+- TypeScript
+- Tailwind CSS
+- Model Context Protocol (MCP) SDK
+
+## Notes
+
+- The application requires the `polymarket-mcp` server to be running and properly configured
+- Data refreshes automatically every 30 seconds
+- Make sure your Polymarket API key and wallet address are correctly configured
