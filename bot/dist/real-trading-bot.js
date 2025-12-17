@@ -47,6 +47,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const ethers_1 = require("ethers");
+const CLOB_API = 'https://clob.polymarket.com';
+const GAMMA_API = 'https://gamma-api.polymarket.com';
 // ============================================================================
 // CONFIGURATION - $10 MAX EXPOSURE
 // ============================================================================
@@ -187,7 +190,85 @@ function shouldEnterPosition(opp, state, config) {
     return { shouldEnter: true, side, edge, size };
 }
 // ============================================================================
-// ORDER EXECUTION (Simulated for now - set dryRun: false for real orders)
+// POLYMARKET CLOB INTEGRATION
+// ============================================================================
+let wallet = null;
+async function initializeWallet() {
+    if (wallet)
+        return true;
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
+    if (!privateKey) {
+        console.error('POLYMARKET_PRIVATE_KEY not set');
+        return false;
+    }
+    try {
+        wallet = new ethers_1.ethers.Wallet(privateKey);
+        console.log(`Wallet initialized: ${wallet.address}`);
+        return true;
+    }
+    catch (e) {
+        console.error('Failed to initialize wallet:', e);
+        return false;
+    }
+}
+async function getMarketTokenIds(conditionId) {
+    try {
+        const response = await fetch(`${GAMMA_API}/markets/${conditionId}`);
+        if (!response.ok)
+            return null;
+        const data = await response.json();
+        let tokenIds = [];
+        if (data.clobTokenIds) {
+            try {
+                tokenIds = JSON.parse(data.clobTokenIds);
+            }
+            catch {
+                return null;
+            }
+        }
+        if (tokenIds.length < 2)
+            return null;
+        return {
+            yesTokenId: tokenIds[0],
+            noTokenId: tokenIds[1],
+        };
+    }
+    catch (e) {
+        console.error('Error fetching token IDs:', e);
+        return null;
+    }
+}
+async function getOrderBook(tokenId) {
+    try {
+        const response = await fetch(`${CLOB_API}/book?token_id=${tokenId}`);
+        if (!response.ok)
+            return null;
+        const book = await response.json();
+        const bestBid = book.bids?.[0]?.price ? parseFloat(book.bids[0].price) : 0;
+        const bestAsk = book.asks?.[0]?.price ? parseFloat(book.asks[0].price) : 1;
+        return { bestBid, bestAsk };
+    }
+    catch (e) {
+        console.error('Error fetching order book:', e);
+        return null;
+    }
+}
+async function createAuthHeaders() {
+    if (!wallet)
+        throw new Error('Wallet not initialized');
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const nonce = Math.floor(Math.random() * 1000000).toString();
+    const message = `${timestamp}${nonce}`;
+    const signature = await wallet.signMessage(message);
+    return {
+        'POLY_ADDRESS': wallet.address,
+        'POLY_SIGNATURE': signature,
+        'POLY_TIMESTAMP': timestamp,
+        'POLY_NONCE': nonce,
+    };
+}
+// ============================================================================
+// ORDER EXECUTION
 // ============================================================================
 async function executeOrder(opp, side, size, config) {
     if (config.dryRun) {
@@ -198,19 +279,70 @@ async function executeOrder(opp, side, size, config) {
             filledPrice: opp.polymarketProb,
         };
     }
-    // REAL ORDER EXECUTION
-    // This requires proper Polymarket CLOB integration
-    // For safety, we'll log and return false until fully tested
-    console.log(`  [REAL] Would place order - NOT IMPLEMENTED YET`);
-    console.log(`  Market: ${opp.market.question.substring(0, 50)}...`);
-    console.log(`  Side: ${side}, Size: $${size.toFixed(2)}`);
-    // TODO: Implement actual order placement using polymarket-client.ts
-    // const client = getPolymarketClient();
-    // await client.initialize();
-    // const tokens = await client.getMarketTokens(opp.market.id);
-    // const tokenId = side === 'long' ? tokens.tokens[0].token_id : tokens.tokens[1].token_id;
-    // const order = await client.placeOrder({ ... });
-    return { success: false, orderId: undefined };
+    // Initialize wallet
+    if (!await initializeWallet()) {
+        console.log(`  [ERROR] Wallet not initialized`);
+        return { success: false };
+    }
+    // Get token IDs
+    const tokens = await getMarketTokenIds(opp.market.id);
+    if (!tokens) {
+        console.log(`  [ERROR] Could not get token IDs for market`);
+        return { success: false };
+    }
+    // For LONG (betting YES), we buy the YES token
+    // For SHORT (betting NO), we buy the NO token
+    const tokenId = side === 'long' ? tokens.yesTokenId : tokens.noTokenId;
+    // Get order book to find best price
+    const book = await getOrderBook(tokenId);
+    if (!book) {
+        console.log(`  [ERROR] Could not get order book`);
+        return { success: false };
+    }
+    // Calculate shares: for buying, we pay the ask price
+    const price = book.bestAsk;
+    const shares = size / price;
+    console.log(`  [REAL] Placing order...`);
+    console.log(`    Token: ${tokenId.substring(0, 20)}...`);
+    console.log(`    Side: BUY (${side === 'long' ? 'YES' : 'NO'})`);
+    console.log(`    Size: $${size.toFixed(2)} = ${shares.toFixed(4)} shares @ ${(price * 100).toFixed(1)}%`);
+    try {
+        const authHeaders = await createAuthHeaders();
+        // Create order payload
+        const orderPayload = {
+            tokenID: tokenId,
+            side: 'BUY',
+            size: shares.toFixed(6),
+            price: price.toFixed(4),
+            type: 'FOK', // Fill or Kill - either fills completely or cancels
+            feeRateBps: '0',
+        };
+        const response = await fetch(`${CLOB_API}/order`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...authHeaders,
+            },
+            body: JSON.stringify(orderPayload),
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.log(`  [ERROR] Order failed: ${response.status} - ${errorText}`);
+            return { success: false };
+        }
+        const result = await response.json();
+        console.log(`  [SUCCESS] Order placed: ${result.id || 'ok'}`);
+        return {
+            success: true,
+            orderId: result.id || `order_${Date.now()}`,
+            filledPrice: price,
+            tokenId,
+        };
+    }
+    catch (e) {
+        console.error(`  [ERROR] Order execution failed:`, e);
+        return { success: false };
+    }
 }
 // ============================================================================
 // MAIN BOT LOOP
@@ -232,15 +364,16 @@ async function runBotCycle(state) {
                 console.log(`  SIGNAL: ${check.side.toUpperCase()} ${opp.market.crypto} - Edge: ${(check.edge * 100).toFixed(1)}%`);
                 const result = await executeOrder(opp, check.side, check.size, CONFIG);
                 if (result.success) {
+                    const filledPrice = result.filledPrice || opp.polymarketProb;
                     const position = {
                         id: `pos_${Date.now()}`,
                         marketId: opp.market.id,
                         marketQuestion: opp.market.question,
-                        tokenId: '',
+                        tokenId: result.tokenId || '',
                         side: check.side,
-                        entryPrice: result.filledPrice || opp.polymarketProb,
+                        entryPrice: filledPrice,
                         size: check.size,
-                        shares: check.size / (check.side === 'long' ? opp.polymarketProb : (1 - opp.polymarketProb)),
+                        shares: check.size / filledPrice,
                         entryEdge: check.edge,
                         entryTimestamp: new Date().toISOString(),
                         orderId: result.orderId,
@@ -248,7 +381,7 @@ async function runBotCycle(state) {
                     };
                     state.openPositions.push(position);
                     state.currentExposure += check.size;
-                    console.log(`  OPENED: $${check.size.toFixed(2)} ${check.side} @ ${(position.entryPrice * 100).toFixed(1)}%`);
+                    console.log(`  OPENED: $${check.size.toFixed(2)} ${check.side} @ ${(filledPrice * 100).toFixed(1)}%`);
                 }
             }
         }
