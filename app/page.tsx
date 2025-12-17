@@ -46,12 +46,12 @@ export default function Home() {
             Crypto Arbitrage
           </Link>
           
-          {/* Paper Trading Link */}
+          {/* Real Trading Link */}
           <Link
-            href="/paper-trading"
+            href="/real-trading"
             className="px-6 py-2.5 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white rounded-lg text-sm font-medium transition-all shadow-sm hover:shadow-md"
           >
-            Paper Trading
+            Real Trading
           </Link>
           
           {/* Market Making Link */}

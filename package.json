@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build && npm run bot:build",
-    "start": "npx next start -p ${PORT:-3000} & sleep 15 && API_BASE_URL=\"http://localhost:${PORT:-3000}\" node bot/dist/trading-bot.js",
+    "start": "npx next start -p ${PORT:-3000} & sleep 15 && API_BASE_URL=\"http://localhost:${PORT:-3000}\" node bot/dist/real-trading-bot.js",
     "lint": "eslint",
     "bot": "ts-node --project bot/tsconfig.json bot/trading-bot.ts",
     "bot:real": "ts-node --project bot/tsconfig.json bot/real-trading-bot.ts",
