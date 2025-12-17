@@ -296,7 +296,7 @@ async function createApiCredentials(): Promise<ApiCredentials | null> {
   
   try {
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const nonce = 0;
+    const nonce = Math.floor(Math.random() * 1000000);  // Random nonce
     const message = 'This message attests that I control the given wallet';
 
     const domain = getApiKeyCreationDomain();
@@ -311,8 +311,9 @@ async function createApiCredentials(): Promise<ApiCredentials | null> {
     console.log('  Signing EIP-712 message for API key creation...');
     const signature = await wallet._signTypedData(domain, types, value);
 
+    // Try derive first (for existing keys)
     console.log('  Requesting API credentials from Polymarket...');
-    const response = await fetch(`${CLOB_API}/auth/derive-api-key`, {
+    const deriveResponse = await fetch(`${CLOB_API}/auth/derive-api-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -324,31 +325,43 @@ async function createApiCredentials(): Promise<ApiCredentials | null> {
       }),
     });
 
-    if (!response.ok) {
-      // Try creating new credentials if derive fails
-      console.log('  Derive failed, trying to create new API key...');
-      const createResponse = await fetch(`${CLOB_API}/auth/api-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address: wallet.address,
-          timestamp,
-          nonce,
-          message,
-          signature,
-        }),
-      });
-      
-      if (!createResponse.ok) {
-        const errorText = await createResponse.text();
-        console.error('  Failed to create API key:', createResponse.status, errorText.substring(0, 200));
-        return null;
-      }
-      
-      return await createResponse.json() as ApiCredentials;
+    if (deriveResponse.ok) {
+      const creds = await deriveResponse.json() as ApiCredentials;
+      console.log('  API credentials derived successfully');
+      return creds;
     }
 
-    return await response.json() as ApiCredentials;
+    // If derive fails, try creating new credentials
+    console.log('  Derive failed, trying to create new API key...');
+    const createResponse = await fetch(`${CLOB_API}/auth/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address: wallet.address,
+        timestamp,
+        nonce,
+        message,
+        signature,
+      }),
+    });
+    
+    if (createResponse.ok) {
+      const creds = await createResponse.json() as ApiCredentials;
+      console.log('  API credentials created successfully');
+      return creds;
+    }
+
+    // Both failed - log the error but try L1 auth as fallback
+    const errorText = await createResponse.text();
+    console.log('  L2 auth failed:', createResponse.status, errorText.substring(0, 100));
+    console.log('  Will use L1 auth for orders (may be blocked by Cloudflare on Railway)');
+    
+    // Return fake credentials to indicate we should use L1 auth
+    return {
+      apiKey: 'USE_L1_AUTH',
+      apiSecret: '',
+      passphrase: '',
+    };
   } catch (e) {
     console.error('  Error creating API credentials:', e);
     return null;
@@ -368,18 +381,35 @@ function createL2Signature(
   return hmac.digest('base64');
 }
 
-function createL2Headers(method: string, path: string, body: string = ''): Record<string, string> {
-  if (!apiCredentials) throw new Error('API credentials not initialized');
+async function createAuthHeaders(method: string, path: string, body: string = ''): Promise<Record<string, string>> {
+  if (!wallet) throw new Error('Wallet not initialized');
   
+  // Check if we have valid L2 credentials
+  if (apiCredentials && apiCredentials.apiKey !== 'USE_L1_AUTH' && apiCredentials.apiSecret) {
+    // Use L2 auth (HMAC signing)
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = createL2Signature(apiCredentials.apiSecret, timestamp, method, path, body);
+
+    return {
+      'POLY_ADDRESS': wallet.address,
+      'POLY_API_KEY': apiCredentials.apiKey,
+      'POLY_SIGNATURE': signature,
+      'POLY_TIMESTAMP': timestamp,
+      'POLY_PASSPHRASE': apiCredentials.passphrase,
+    };
+  }
+  
+  // Fallback to L1 auth (wallet signature)
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const signature = createL2Signature(apiCredentials.apiSecret, timestamp, method, path, body);
+  const nonce = Math.floor(Math.random() * 1000000).toString();
+  const message = `${timestamp}${nonce}`;
+  const signature = await wallet.signMessage(message);
 
   return {
-    'POLY_ADDRESS': wallet?.address || '',
-    'POLY_API_KEY': apiCredentials.apiKey,
+    'POLY_ADDRESS': wallet.address,
     'POLY_SIGNATURE': signature,
     'POLY_TIMESTAMP': timestamp,
-    'POLY_PASSPHRASE': apiCredentials.passphrase,
+    'POLY_NONCE': nonce,
   };
 }
 
@@ -534,7 +564,7 @@ async function executeOrder(
     };
     
     const bodyStr = JSON.stringify(orderPayload);
-    const authHeaders = createL2Headers('POST', '/order', bodyStr);
+    const authHeaders = await createAuthHeaders('POST', '/order', bodyStr);
     
     const response = await fetch(`${CLOB_API}/order`, {
       method: 'POST',
