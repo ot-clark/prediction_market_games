@@ -47,9 +47,11 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const crypto = __importStar(require("crypto"));
 const ethers_1 = require("ethers");
 const CLOB_API = 'https://clob.polymarket.com';
 const GAMMA_API = 'https://gamma-api.polymarket.com';
+const CHAIN_ID = 137;
 // ============================================================================
 // CONFIGURATION - $10 MAX EXPOSURE
 // ============================================================================
@@ -189,12 +191,103 @@ function shouldEnterPosition(opp, state, config) {
     const side = edge > 0 ? 'short' : 'long';
     return { shouldEnter: true, side, edge, size };
 }
-// ============================================================================
-// POLYMARKET CLOB INTEGRATION
-// ============================================================================
 let wallet = null;
+let apiCredentials = null;
+function getApiKeyCreationDomain() {
+    return {
+        name: 'ClobAuthDomain',
+        version: '1',
+        chainId: CHAIN_ID,
+    };
+}
+function getApiKeyCreationTypes() {
+    return {
+        ClobAuth: [
+            { name: 'address', type: 'address' },
+            { name: 'timestamp', type: 'string' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'message', type: 'string' },
+        ],
+    };
+}
+async function createApiCredentials() {
+    if (!wallet)
+        return null;
+    try {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const nonce = 0;
+        const message = 'This message attests that I control the given wallet';
+        const domain = getApiKeyCreationDomain();
+        const types = getApiKeyCreationTypes();
+        const value = {
+            address: wallet.address,
+            timestamp,
+            nonce,
+            message,
+        };
+        console.log('  Signing EIP-712 message for API key creation...');
+        const signature = await wallet._signTypedData(domain, types, value);
+        console.log('  Requesting API credentials from Polymarket...');
+        const response = await fetch(`${CLOB_API}/auth/derive-api-key`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                address: wallet.address,
+                timestamp,
+                nonce,
+                message,
+                signature,
+            }),
+        });
+        if (!response.ok) {
+            // Try creating new credentials if derive fails
+            console.log('  Derive failed, trying to create new API key...');
+            const createResponse = await fetch(`${CLOB_API}/auth/api-key`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    address: wallet.address,
+                    timestamp,
+                    nonce,
+                    message,
+                    signature,
+                }),
+            });
+            if (!createResponse.ok) {
+                const errorText = await createResponse.text();
+                console.error('  Failed to create API key:', createResponse.status, errorText.substring(0, 200));
+                return null;
+            }
+            return await createResponse.json();
+        }
+        return await response.json();
+    }
+    catch (e) {
+        console.error('  Error creating API credentials:', e);
+        return null;
+    }
+}
+function createL2Signature(secret, timestamp, method, path, body = '') {
+    const message = timestamp + method + path + body;
+    const hmac = crypto.createHmac('sha256', Buffer.from(secret, 'base64'));
+    hmac.update(message);
+    return hmac.digest('base64');
+}
+function createL2Headers(method, path, body = '') {
+    if (!apiCredentials)
+        throw new Error('API credentials not initialized');
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = createL2Signature(apiCredentials.apiSecret, timestamp, method, path, body);
+    return {
+        'POLY_ADDRESS': wallet?.address || '',
+        'POLY_API_KEY': apiCredentials.apiKey,
+        'POLY_SIGNATURE': signature,
+        'POLY_TIMESTAMP': timestamp,
+        'POLY_PASSPHRASE': apiCredentials.passphrase,
+    };
+}
 async function initializeWallet() {
-    if (wallet)
+    if (wallet && apiCredentials)
         return true;
     const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
     if (!privateKey) {
@@ -204,6 +297,14 @@ async function initializeWallet() {
     try {
         wallet = new ethers_1.ethers.Wallet(privateKey);
         console.log(`Wallet initialized: ${wallet.address}`);
+        // Get L2 API credentials
+        console.log('Getting Polymarket L2 API credentials...');
+        apiCredentials = await createApiCredentials();
+        if (!apiCredentials) {
+            console.error('Failed to get API credentials');
+            return false;
+        }
+        console.log('L2 API credentials obtained successfully');
         return true;
     }
     catch (e) {
@@ -253,20 +354,7 @@ async function getOrderBook(tokenId) {
         return null;
     }
 }
-async function createAuthHeaders() {
-    if (!wallet)
-        throw new Error('Wallet not initialized');
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const nonce = Math.floor(Math.random() * 1000000).toString();
-    const message = `${timestamp}${nonce}`;
-    const signature = await wallet.signMessage(message);
-    return {
-        'POLY_ADDRESS': wallet.address,
-        'POLY_SIGNATURE': signature,
-        'POLY_TIMESTAMP': timestamp,
-        'POLY_NONCE': nonce,
-    };
-}
+// Auth headers are now created by createL2Headers()
 // ============================================================================
 // ORDER EXECUTION
 // ============================================================================
@@ -315,7 +403,6 @@ async function executeOrder(opp, side, size, config) {
     console.log(`    Side: BUY (${side === 'long' ? 'YES' : 'NO'})`);
     console.log(`    Size: $${size.toFixed(2)} = ${shares.toFixed(4)} shares @ ${(price * 100).toFixed(1)}%`);
     try {
-        const authHeaders = await createAuthHeaders();
         // Create order payload
         const orderPayload = {
             tokenID: tokenId,
@@ -325,13 +412,15 @@ async function executeOrder(opp, side, size, config) {
             type: 'FOK', // Fill or Kill - either fills completely or cancels
             feeRateBps: '0',
         };
+        const bodyStr = JSON.stringify(orderPayload);
+        const authHeaders = createL2Headers('POST', '/order', bodyStr);
         const response = await fetch(`${CLOB_API}/order`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 ...authHeaders,
             },
-            body: JSON.stringify(orderPayload),
+            body: bodyStr,
         });
         if (!response.ok) {
             const errorText = await response.text();
