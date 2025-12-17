@@ -98,7 +98,7 @@ const CONFIG: RealBotConfig = {
   maxPositionSize: 5,            // Max $5 per position (half of total)
   pollIntervalMs: 120000,        // Check every 2 minutes (avoid rate limits)
   minTimeToExpiry: 1,            // At least 1 day to expiry
-  dryRun: true,                  // START IN DRY RUN MODE - set to false for real trading
+  dryRun: false,                 // LIVE TRADING ENABLED
 };
 
 const STATE_FILE = process.env.NODE_ENV === 'production'
