@@ -137,13 +137,13 @@ function shouldEnterPosition(opp, state, config) {
     // Use Deribit edge if available, otherwise Z-score
     const edge = opp.edgeVsDeribit ?? opp.edgeVsZscore;
     const absEdge = Math.abs(edge);
-    // SAFETY CHECK 1: Skip markets with extreme prices (already resolved or near-certain)
+    // SAFETY CHECK 1: Skip essentially resolved markets (>99% or <1%)
     const polyPrice = opp.polymarketProb;
-    if (polyPrice > 0.95) {
-        return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% > 95% (likely resolved)` };
+    if (polyPrice > 0.99) {
+        return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% > 99% (resolved)` };
     }
-    if (polyPrice < 0.05) {
-        return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% < 5% (likely resolved)` };
+    if (polyPrice < 0.01) {
+        return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% < 1% (resolved)` };
     }
     // SAFETY CHECK 2: For "dip" markets, verify the target hasn't been hit already
     // If current price is below target and direction is "below", the dip already happened

@@ -195,9 +195,12 @@ function shouldEnterPosition(
   const absEdge = Math.abs(edge);
   const polyPrice = opp.polymarketProb;
   
-  // SAFETY: Skip extreme prices
-  if (polyPrice > 0.95 || polyPrice < 0.05) {
-    return { shouldEnter: false, side: 'long', edge, size: 0, reason: `Price ${(polyPrice * 100).toFixed(1)}% is extreme` };
+  // SAFETY: Skip essentially resolved markets (>99% or <1%)
+  if (polyPrice > 0.99) {
+    return { shouldEnter: false, side: 'long', edge, size: 0, reason: `Price ${(polyPrice * 100).toFixed(1)}% > 99% (resolved)` };
+  }
+  if (polyPrice < 0.01) {
+    return { shouldEnter: false, side: 'long', edge, size: 0, reason: `Price ${(polyPrice * 100).toFixed(1)}% < 1% (resolved)` };
   }
   
   // SAFETY: Check if event already happened
