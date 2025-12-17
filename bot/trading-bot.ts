@@ -225,6 +225,41 @@ function shouldEnterPosition(
   const edge = opp.edgeVsDeribit ?? opp.edgeVsZscore;
   const absEdge = Math.abs(edge);
   
+  // SAFETY CHECK 1: Skip markets with extreme prices (already resolved or near-certain)
+  const polyPrice = opp.polymarketProb;
+  if (polyPrice > 0.95) {
+    return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% > 95% (likely resolved)` };
+  }
+  if (polyPrice < 0.05) {
+    return { shouldEnter: false, side: 'long', edge, reason: `Market price ${(polyPrice * 100).toFixed(1)}% < 5% (likely resolved)` };
+  }
+  
+  // SAFETY CHECK 2: For "dip" markets, verify the target hasn't been hit already
+  // If current price is below target and direction is "below", the dip already happened
+  const currentCryptoPrice = opp.currentPrice?.price;
+  const targetPrice = opp.market.targetPrice;
+  const direction = opp.market.direction;
+  const betType = opp.market.betType;
+  
+  if (currentCryptoPrice && targetPrice && betType === 'one-touch') {
+    if (direction === 'below' && currentCryptoPrice <= targetPrice) {
+      return { shouldEnter: false, side: 'long', edge, reason: `Dip already happened: current $${currentCryptoPrice.toLocaleString()} <= target $${targetPrice.toLocaleString()}` };
+    }
+    if (direction === 'above' && currentCryptoPrice >= targetPrice) {
+      return { shouldEnter: false, side: 'long', edge, reason: `Target already hit: current $${currentCryptoPrice.toLocaleString()} >= target $${targetPrice.toLocaleString()}` };
+    }
+  }
+  
+  // SAFETY CHECK 3: Sanity check model probability vs market price
+  // If model says 95%+ and market says 95%+, there's no real edge to trade
+  const modelProb = opp.deribitProb?.probability ?? opp.zscoreProb?.probability;
+  if (modelProb && modelProb > 0.90 && polyPrice > 0.90) {
+    return { shouldEnter: false, side: 'long', edge, reason: `Both model (${(modelProb * 100).toFixed(0)}%) and market (${(polyPrice * 100).toFixed(0)}%) agree at high probability` };
+  }
+  if (modelProb && modelProb < 0.10 && polyPrice < 0.10) {
+    return { shouldEnter: false, side: 'long', edge, reason: `Both model (${(modelProb * 100).toFixed(0)}%) and market (${(polyPrice * 100).toFixed(0)}%) agree at low probability` };
+  }
+  
   // Check minimum edge
   if (absEdge < config.minEdgeToEnter) {
     return { shouldEnter: false, side: 'long', edge, reason: `Edge ${(absEdge * 100).toFixed(1)}% < ${(config.minEdgeToEnter * 100)}% threshold` };

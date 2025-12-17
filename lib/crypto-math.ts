@@ -561,19 +561,46 @@ export function parseCryptoMarketQuestion(question: string): {
 } | null {
   const q = question.toLowerCase();
   
+  // EXCLUSION PATTERNS - Skip markets that aren't about crypto spot prices
+  const exclusionPatterns = [
+    /market\s*cap/i,           // "MegaETH market cap" - not a price target
+    /\bfdv\b/i,                // Fully diluted valuation
+    /\btvl\b/i,                // Total value locked
+    /\bmcap\b/i,               // Market cap abbreviation
+    /dominance/i,              // "BTC dominance"
+    /\bfee[s]?\b/i,            // "ETH fees"
+    /\bgas\b/i,                // "ETH gas"
+    /\bstaking\b/i,            // Staking related
+    /\bairdrop\b/i,            // Airdrop related
+    /\betf\b/i,                // ETF related
+    /\bhalving\b/i,            // Halving events
+    /mega\s*eth/i,             // MegaETH (different project)
+    /\bweth\b/i,               // Wrapped ETH
+    /\bsteth\b/i,              // Staked ETH
+    /\breth\b/i,               // Rocket Pool ETH
+    /\bcbeth\b/i,              // Coinbase ETH
+  ];
+  
+  for (const pattern of exclusionPatterns) {
+    if (pattern.test(question)) {
+      return null;
+    }
+  }
+  
   // Check if this is a crypto price market
+  // Use word boundaries to avoid matching "MegaETH" when looking for "ETH"
   const cryptoPatterns = [
-    { pattern: /bitcoin|btc/i, symbol: 'BTC' },
-    { pattern: /ethereum|eth(?!er)/i, symbol: 'ETH' },
-    { pattern: /solana|sol(?!ar)/i, symbol: 'SOL' },
-    { pattern: /cardano|ada/i, symbol: 'ADA' },
-    { pattern: /dogecoin|doge/i, symbol: 'DOGE' },
-    { pattern: /xrp|ripple/i, symbol: 'XRP' },
-    { pattern: /polygon|matic/i, symbol: 'MATIC' },
-    { pattern: /avalanche|avax/i, symbol: 'AVAX' },
-    { pattern: /chainlink|link/i, symbol: 'LINK' },
-    { pattern: /polkadot|dot/i, symbol: 'DOT' },
-    { pattern: /litecoin|ltc/i, symbol: 'LTC' },
+    { pattern: /\bbitcoin\b|\bbtc\b/i, symbol: 'BTC' },
+    { pattern: /\bethereum\b|\beth\b(?!er)/i, symbol: 'ETH' },
+    { pattern: /\bsolana\b|\bsol\b(?!ar)/i, symbol: 'SOL' },
+    { pattern: /\bcardano\b|\bada\b/i, symbol: 'ADA' },
+    { pattern: /\bdogecoin\b|\bdoge\b/i, symbol: 'DOGE' },
+    { pattern: /\bxrp\b|\bripple\b/i, symbol: 'XRP' },
+    { pattern: /\bpolygon\b|\bmatic\b/i, symbol: 'MATIC' },
+    { pattern: /\bavalanche\b|\bavax\b/i, symbol: 'AVAX' },
+    { pattern: /\bchainlink\b|\blink\b/i, symbol: 'LINK' },
+    { pattern: /\bpolkadot\b|\bdot\b/i, symbol: 'DOT' },
+    { pattern: /\blitecoin\b|\bltc\b/i, symbol: 'LTC' },
   ];
   
   let crypto: string | null = null;
@@ -587,7 +614,7 @@ export function parseCryptoMarketQuestion(question: string): {
   if (!crypto) return null;
   
   // Check for price target keywords
-  const priceKeywords = /price|hit|reach|above|below|exceed|surpass|\$|over|under/i;
+  const priceKeywords = /\bprice\b|\bhit\b|\breach\b|\babove\b|\bbelow\b|\bexceed\b|\bsurpass\b|\$|\bover\b|\bunder\b|\bdip\b/i;
   if (!priceKeywords.test(question)) return null;
   
   // Extract price target
