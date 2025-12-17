@@ -366,6 +366,18 @@ async function fetchPolymarketCryptoMarkets(limit: number): Promise<CryptoMarket
       // Skip if no valid price
       if (polymarketPrice <= 0 || polymarketPrice >= 1) continue;
 
+      // Parse token IDs for trading
+      let tokenIds: string[] = [];
+      if (market.clobTokenIds) {
+        try {
+          tokenIds = typeof market.clobTokenIds === 'string' 
+            ? JSON.parse(market.clobTokenIds) 
+            : market.clobTokenIds;
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
       markets.push({
         id: market.conditionId || market.id,
         question,
@@ -379,6 +391,7 @@ async function fetchPolymarketCryptoMarkets(limit: number): Promise<CryptoMarket
         polymarketPrice,
         volume: market.volumeNum?.toString() || market.volume?.toString(),
         liquidity: market.liquidity?.toString(),
+        tokenIds,  // Include for trading
       });
     }
   } catch (error) {

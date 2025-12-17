@@ -19,6 +19,7 @@ export interface CryptoMarket {
   polymarketAsk?: number;
   volume?: string;
   liquidity?: string;
+  tokenIds?: string[];      // CLOB token IDs [YES, NO] for trading
   
   // Resolved status
   resolved?: boolean;

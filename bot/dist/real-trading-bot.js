@@ -284,15 +284,23 @@ async function executeOrder(opp, side, size, config) {
         console.log(`  [ERROR] Wallet not initialized`);
         return { success: false };
     }
-    // Get token IDs
-    const tokens = await getMarketTokenIds(opp.market.id);
-    if (!tokens) {
-        console.log(`  [ERROR] Could not get token IDs for market`);
-        return { success: false };
+    // Get token IDs - first try from opportunity, then fallback to API
+    let tokenId;
+    const marketTokenIds = opp.market.tokenIds;
+    if (marketTokenIds && marketTokenIds.length >= 2) {
+        // Use tokens from API response
+        tokenId = side === 'long' ? marketTokenIds[0] : marketTokenIds[1];
     }
-    // For LONG (betting YES), we buy the YES token
-    // For SHORT (betting NO), we buy the NO token
-    const tokenId = side === 'long' ? tokens.yesTokenId : tokens.noTokenId;
+    else {
+        // Fallback: fetch from API
+        console.log(`  [INFO] No tokenIds in opportunity, fetching from API...`);
+        const tokens = await getMarketTokenIds(opp.market.id);
+        if (!tokens) {
+            console.log(`  [ERROR] Could not get token IDs for market`);
+            return { success: false };
+        }
+        tokenId = side === 'long' ? tokens.yesTokenId : tokens.noTokenId;
+    }
     // Get order book to find best price
     const book = await getOrderBook(tokenId);
     if (!book) {
