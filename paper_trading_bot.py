@@ -1,8 +1,11 @@
 """
-Paper Trading Bot
+Crypto Volatility Paper Trading Bot
 
-Runs 24/7 and trades based on edge between Polymarket and model probabilities.
-This is a paper trading bot that simulates trades without using real money.
+Runs 24/7 and trades crypto volatility markets based on edge between Polymarket prices
+and model probabilities (z-score and Deribit options data).
+
+This bot focuses exclusively on crypto price target markets (e.g., "Will Bitcoin hit $200k by Dec 2025?").
+It is a paper trading bot that simulates trades without using real money.
 """
 
 import json
@@ -348,11 +351,11 @@ def run_bot_cycle(state: Dict):
     print(f'{"="*60}')
     
     try:
-        # Fetch latest arbitrage data
-        print('📊 Fetching arbitrage opportunities...')
+        # Fetch latest crypto trading opportunities
+        print('📊 Fetching crypto volatility opportunities...')
         result = calculate_arbitrage_opportunities(limit=100)
         opportunities = result.get('opportunities', [])
-        print(f'✓ Found {len(opportunities)} opportunities')
+        print(f'✓ Found {len(opportunities)} crypto opportunities')
         
         if not opportunities:
             print('⚠ No opportunities found, skipping cycle')

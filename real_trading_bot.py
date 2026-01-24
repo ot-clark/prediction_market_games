@@ -1,7 +1,9 @@
 """
-Real Trading Bot
+Crypto Volatility Real Trading Bot
 
-Trades real USDC on Polymarket based on arbitrage opportunities.
+Trades real USDC on Polymarket based on crypto volatility opportunities.
+
+This bot focuses exclusively on crypto price target markets (e.g., "Will Bitcoin hit $200k by Dec 2025?").
 
 IMPORTANT: This uses REAL MONEY. Use with caution.
 
@@ -248,7 +250,7 @@ def run_bot_cycle(state: Dict):
     try:
         result = calculate_arbitrage_opportunities(limit=100)
         opportunities = result.get('opportunities', [])
-        print(f'  Fetched {len(opportunities)} opportunities')
+        print(f'  Fetched {len(opportunities)} crypto opportunities')
         
         # STEP 1: Check for market resolutions
         positions_to_remove = []

@@ -1,6 +1,6 @@
-# Prediction Market Arbitrage Bot
+# Crypto Volatility Trading Bot
 
-A Python bot that **forward-tests** arbitrage opportunities between Polymarket prediction markets and model probabilities (z-score and Deribit options data).
+A Python bot that **forward-tests** crypto volatility trading opportunities by comparing Polymarket crypto price target markets against model probabilities (z-score and Deribit options data).
 
 ## ⚠️ Important
 
@@ -10,7 +10,7 @@ A Python bot that **forward-tests** arbitrage opportunities between Polymarket p
 
 - **Crypto Price Target Markets**: Finds markets on Polymarket that bet on crypto price targets (e.g., "Will Bitcoin hit $200k by Dec 2025?")
 - **Probability Calculations**: Uses z-score method and Deribit options data to calculate model probabilities
-- **Arbitrage Detection**: Compares Polymarket prices vs model probabilities to find edges
+- **Edge Detection**: Compares Polymarket prices vs model probabilities to find trading edges
 - **Forward Testing**: Simulates trades and tracks performance metrics
 - **Real-time P&L Tracking**: Shows realized and unrealized P&L, total return, win rate
 
@@ -57,7 +57,7 @@ See **[BOT_DOCUMENTATION.md](BOT_DOCUMENTATION.md)** for detailed behavior.
 2. Gets current prices from CoinGecko
 3. Gets options data from Deribit (for BTC/ETH)
 4. Calculates model probabilities using z-score and Black-Scholes
-5. Finds arbitrage edges (Polymarket price vs model)
+5. Finds trading edges (Polymarket price vs model)
 6. Enters positions when edge > 5%
 7. Exits positions when edge < 5% or flips
 8. Tracks all P&L and performance metrics
@@ -68,7 +68,7 @@ See **[BOT_DOCUMENTATION.md](BOT_DOCUMENTATION.md)** for detailed behavior.
 ============================================================
 [2024-01-15 14:30:00] BOT CYCLE START
 ============================================================
-📊 Fetching arbitrage opportunities...
+📊 Fetching crypto trading opportunities...
 ✓ Found 45 opportunities
 
 🟢 OPENING POSITION #1
@@ -114,7 +114,7 @@ CONFIG = {
 ├── config.py                 # Configuration constants
 ├── crypto_math.py            # Probability calculations
 ├── data_fetchers.py          # API fetching
-├── arbitrage_calculator.py # Main arbitrage logic
+├── arbitrage_calculator.py # Crypto volatility opportunity calculator
 ├── paper_trading_bot.py      # Forward-testing bot
 ├── requirements.txt          # Python dependencies
 ├── BOT_DOCUMENTATION.md      # Detailed behavior

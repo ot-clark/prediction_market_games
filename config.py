@@ -1,5 +1,7 @@
 """
-Configuration constants for the prediction market arbitrage bot
+Configuration constants for the crypto volatility trading bot
+
+This bot focuses exclusively on crypto price target markets on Polymarket.
 """
 
 # CoinGecko ID mapping

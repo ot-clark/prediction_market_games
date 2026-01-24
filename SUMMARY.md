@@ -4,7 +4,7 @@
 
 ### Core Functionality
 
-The bot is a **forward-testing arbitrage trading system** that:
+The bot is a **forward-testing crypto volatility trading system** that:
 
 1. **Scans Polymarket** every 60 seconds for crypto price target markets
    - Examples: "Will Bitcoin hit $200k by Dec 2025?", "Will Ethereum reach $10k before 2026?"
@@ -15,7 +15,7 @@ The bot is a **forward-testing arbitrage trading system** that:
    - **Deribit Method** (BTC/ETH only): Uses Black-Scholes delta from options market data
    - Accounts for bet type (binary vs one-touch) and direction (above vs below)
 
-3. **Finds Arbitrage Edges**:
+3. **Finds Trading Edges**:
    - Edge = Polymarket Price - Model Probability
    - Positive edge = Polymarket overpriced (sell signal)
    - Negative edge = Polymarket underpriced (buy signal)
@@ -61,7 +61,7 @@ Each cycle (every 60 seconds) shows:
 ============================================================
 [2024-01-15 14:30:00] BOT CYCLE START
 ============================================================
-📊 Fetching arbitrage opportunities...
+📊 Fetching crypto trading opportunities...
 ✓ Found 45 opportunities
 
 📈 Updating 3 open positions...

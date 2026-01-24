@@ -2,7 +2,7 @@
 
 ## Overview
 
-This bot is a **forward-testing arbitrage trading system** that identifies and simulates trades on crypto price target markets on Polymarket. It does NOT place real orders - it only simulates trading to test the strategy.
+This bot is a **forward-testing crypto volatility trading system** that identifies and simulates trades on crypto price target markets on Polymarket. It focuses exclusively on crypto volatility markets and does NOT place real orders - it only simulates trading to test the strategy.
 
 ## What the Bot Does
 
@@ -32,7 +32,7 @@ The bot performs the following steps:
      - More accurate for BTC/ETH as it uses market-implied volatility
    - **One-Touch Adjustments**: For "touch" bets, multiplies probability by 2x (path-dependent)
 
-5. **Calculates Arbitrage Edge**
+5. **Calculates Trading Edge**
    - Edge = Polymarket Price - Model Probability
    - Positive edge = Polymarket overpriced (sell signal)
    - Negative edge = Polymarket underpriced (buy signal)
@@ -102,7 +102,7 @@ Each cycle produces:
 ============================================================
 [2024-01-15 14:30:00] BOT CYCLE START
 ============================================================
-📊 Fetching arbitrage opportunities...
+📊 Fetching crypto trading opportunities...
 ✓ Found 45 opportunities
 
 📈 Updating 3 open positions...

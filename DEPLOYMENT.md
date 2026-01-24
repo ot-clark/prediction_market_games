@@ -110,7 +110,7 @@ Add the following content:
 
 ```ini
 [Unit]
-Description=Prediction Market Arbitrage Bot
+Description=Crypto Volatility Trading Bot
 After=network.target
 
 [Service]

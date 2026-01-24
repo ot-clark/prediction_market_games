@@ -1,8 +1,11 @@
 """
-Crypto Arbitrage Calculator
+Crypto Volatility Opportunity Calculator
 
-Calculates arbitrage opportunities by comparing Polymarket prices
+Calculates crypto volatility trading opportunities by comparing Polymarket crypto price target markets
 against model probabilities (z-score and Deribit options data).
+
+This module focuses exclusively on crypto volatility markets - markets that bet on whether
+a crypto will reach a certain price target by a certain date.
 """
 
 import math
@@ -24,7 +27,13 @@ from config import DEFAULT_VOLATILITY, DERIBIT_SUPPORTED
 
 def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
     """
-    Main function to calculate all arbitrage opportunities
+    Main function to calculate all crypto volatility trading opportunities
+    
+    This function:
+    - Fetches crypto price target markets from Polymarket
+    - Calculates model probabilities using z-score and Deribit options data
+    - Finds edges between Polymarket prices and model probabilities
+    - Returns opportunities sorted by edge magnitude
     """
     # Step 1: Fetch Polymarket markets
     polymarket_markets = fetch_polymarket_crypto_markets(limit)
