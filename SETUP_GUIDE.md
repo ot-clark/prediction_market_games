@@ -177,3 +177,4 @@ If this runs without errors, your path is correct!
 - Polymarket API Docs: https://docs.polymarket.com
 - Check the polymarket-mcp repository for specific setup instructions
 - Verify your MCP server is working: `cd /path/to/polymarket-mcp && uv run polymarket-mcp`
+

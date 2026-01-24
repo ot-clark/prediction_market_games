@@ -1,0 +1,10 @@
+{
+  "/api/bot/real-status/route": "app/api/bot/real-status/route.js",
+  "/api/crypto-arbitrage/route": "app/api/crypto-arbitrage/route.js",
+  "/api/crypto-prices/route": "app/api/crypto-prices/route.js",
+  "/api/deribit/route": "app/api/deribit/route.js",
+  "/api/markets/route": "app/api/markets/route.js",
+  "/crypto-arbitrage/page": "app/crypto-arbitrage/page.js",
+  "/page": "app/page.js",
+  "/real-trading/page": "app/real-trading/page.js"
+}

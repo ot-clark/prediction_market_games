@@ -98,3 +98,4 @@ You now have:
 - ✅ Configuration ready (just need to add your API key)
 
 **Final step**: Add your API key to `.env.local` and you're ready to go! 🚀
+

@@ -1,108 +1,155 @@
-# Polymarket Real-Time Data Dashboard
+# Prediction Market Arbitrage Bot
 
-A Next.js application that displays real-time Polymarket prediction market data including bids, asks, volume, liquidity, event names, and resolution dates in a tabular format.
+A Python bot that **forward-tests** arbitrage opportunities between Polymarket prediction markets and model probabilities (z-score and Deribit options data).
+
+## ⚠️ Important
+
+**This bot is in FORWARD-TESTING MODE only. It does NOT place real orders.** It simulates trades to test the strategy's performance.
 
 ## Features
 
-- Real-time Polymarket market data
-- Comprehensive table view with:
-  - Event names
-  - Bids and asks
-  - Spread calculations
-  - Volume and liquidity
-  - Resolution/expiry dates
-  - Market status
-- Auto-refresh every 30 seconds
-- Clean, modern UI with dark mode support
+- **Crypto Price Target Markets**: Finds markets on Polymarket that bet on crypto price targets (e.g., "Will Bitcoin hit $200k by Dec 2025?")
+- **Probability Calculations**: Uses z-score method and Deribit options data to calculate model probabilities
+- **Arbitrage Detection**: Compares Polymarket prices vs model probabilities to find edges
+- **Forward Testing**: Simulates trades and tracks performance metrics
+- **Real-time P&L Tracking**: Shows realized and unrealized P&L, total return, win rate
 
-## Setup
+## Quick Start
 
-### 1. Install Dependencies
+### Local Testing
 
+1. Install Python dependencies:
 ```bash
-npm install
+pip install -r requirements.txt
 ```
 
-### 2. Configure MCP Server
-
-The application uses the Polymarket MCP server to fetch data. You need to:
-
-1. **Set up the MCP server in Cursor** (or your MCP client):
-   
-   Add this to your Cursor settings (`~/.cursor/mcp.json` or similar):
-   
-   ```json
-   {
-     "mcpServers": {
-       "polymarket-mcp": {
-         "command": "uv",
-         "args": [
-           "--directory",
-           "/Users/{INSERT_USER}/YOUR/PATH/TO/polymarket-mcp",
-           "run",
-           "polymarket-mcp"
-         ],
-         "env": {
-           "KEY": "<insert polymarket api key>",
-           "FUNDER": "<insert polymarket wallet address>"
-         }
-       }
-     }
-   }
-   ```
-
-2. **Set Environment Variables**:
-   
-   Create a `.env.local` file in the project root:
-   
-   ```env
-   POLYMARKET_MCP_PATH=/Users/owenclark/polymarket-mcp
-   POLYMARKET_API_KEY=your_polymarket_api_key_here
-   POLYMARKET_FUNDER=your_polymarket_wallet_address_here
-   ```
-   
-   Or use `KEY` and `FUNDER` to match the MCP server configuration.
-
-### 3. Run Development Server
-
+2. Run the bot:
 ```bash
-npm run dev
+python paper_trading_bot.py
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to see the dashboard.
+The bot will:
+- Fetch arbitrage opportunities every 60 seconds
+- Enter positions when edge > 5%
+- Exit positions when edge < 5%
+- Track P&L, returns, and win rate
+- Save state to `data/bot_state.json`
+
+### Production Deployment
+
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for complete production setup instructions.
+
+Quick version:
+```bash
+# On your VM
+git clone <repo> && cd prediction_market_arb
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python paper_trading_bot.py
+```
+
+## What the Bot Does
+
+See **[BOT_DOCUMENTATION.md](BOT_DOCUMENTATION.md)** for detailed behavior.
+
+**Summary:**
+1. Fetches crypto price target markets from Polymarket
+2. Gets current prices from CoinGecko
+3. Gets options data from Deribit (for BTC/ETH)
+4. Calculates model probabilities using z-score and Black-Scholes
+5. Finds arbitrage edges (Polymarket price vs model)
+6. Enters positions when edge > 5%
+7. Exits positions when edge < 5% or flips
+8. Tracks all P&L and performance metrics
+
+## Output Example
+
+```
+============================================================
+[2024-01-15 14:30:00] BOT CYCLE START
+============================================================
+📊 Fetching arbitrage opportunities...
+✓ Found 45 opportunities
+
+🟢 OPENING POSITION #1
+   Market: Will Bitcoin hit $200,000 by December 31, 2025?
+   Side: LONG
+   Edge: -8.45%
+   Entry Price: 32.10%
+   Position Size: $67.25
+
+============================================================
+📊 PORTFOLIO SUMMARY
+============================================================
+💰 Balance: $892.50
+📈 Open Positions: 4
+💵 Realized P&L: +$45.67
+📊 Total P&L: +$58.01
+📉 Total Return: +5.80%
+🎯 Win Rate: 62.5% (5W / 3L)
+============================================================
+```
+
+## Configuration
+
+Edit `CONFIG` in `paper_trading_bot.py`:
+
+```python
+CONFIG = {
+    'starting_balance': 1000,           # Starting capital
+    'min_edge_to_enter': 0.05,         # 5% minimum edge
+    'max_edge_to_exit': 0.05,          # Exit when edge < 5%
+    'base_position_size': 25,           # Base position size
+    'edge_multiplier': 500,              # Edge scaling
+    'max_position_size': 100,           # Max per position
+    'max_total_exposure': 500,           # Max total exposure
+    'poll_interval_seconds': 60,         # Check frequency
+}
+```
 
 ## Project Structure
 
-- `app/api/markets/route.ts` - API route that fetches data from MCP server
-- `components/MarketDashboard.tsx` - Main dashboard component
-- `components/MarketsTable.tsx` - Table component displaying market data
-- `types/polymarket.ts` - TypeScript types for Polymarket data
-
-## API Endpoints
-
-### GET `/api/markets`
-
-Fetches Polymarket market data.
-
-**Query Parameters:**
-- `limit` (optional): Maximum number of markets to return (default: 100)
-- `active` (optional): Filter for active markets only (default: true)
-
-**Example:**
 ```
-GET /api/markets?limit=50&active=true
+.
+├── config.py                 # Configuration constants
+├── crypto_math.py            # Probability calculations
+├── data_fetchers.py          # API fetching
+├── arbitrage_calculator.py # Main arbitrage logic
+├── paper_trading_bot.py      # Forward-testing bot
+├── requirements.txt          # Python dependencies
+├── BOT_DOCUMENTATION.md      # Detailed behavior
+├── DEPLOYMENT.md             # Production setup
+└── data/                     # Bot state files
+    └── bot_state.json        # Saved state
 ```
 
-## Technologies
+## Data Sources
 
-- Next.js 16
-- React 19
-- TypeScript
-- Tailwind CSS
-- Model Context Protocol (MCP) SDK
+- **Polymarket**: Crypto price target markets
+- **CoinGecko**: Current crypto prices
+- **Deribit**: Options IV for BTC and ETH
+
+## Performance Metrics
+
+The bot tracks:
+- **Total Return**: Overall percentage return
+- **Realized P&L**: Closed trade profits/losses
+- **Unrealized P&L**: Open position mark-to-market
+- **Win Rate**: Percentage of winning trades
+- **Trade Count**: Total number of trades
+
+## Documentation
+
+- **[BOT_DOCUMENTATION.md](BOT_DOCUMENTATION.md)**: Detailed explanation of bot behavior
+- **[DEPLOYMENT.md](DEPLOYMENT.md)**: Production deployment guide
 
 ## Notes
 
-- The application requires the `polymarket-mcp` server to be running and properly configured
-- Data refreshes automatically every 30 seconds
-- Make sure your Polymarket API key and wallet address are correctly configured
+- Bot is in **forward-testing mode** - no real orders
+- State persists across restarts
+- Conservative position sizing and exposure limits
+- All trades logged to state file
+
+## License
+
+MIT

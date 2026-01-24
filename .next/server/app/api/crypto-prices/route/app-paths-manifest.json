@@ -1,0 +1,3 @@
+{
+  "/api/crypto-prices/route": "app/api/crypto-prices/route.js"
+}

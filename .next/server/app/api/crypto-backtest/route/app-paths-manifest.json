@@ -1,0 +1,3 @@
+{
+  "/api/crypto-backtest/route": "app/api/crypto-backtest/route.js"
+}

@@ -197,3 +197,4 @@ Once installed, update your `.env.local` file in the prediction_market_arb proje
 - Your funder address
 
 Then test the connection!
+
