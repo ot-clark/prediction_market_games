@@ -21,6 +21,12 @@ data/*.json
 logs/
 *.log
 
+# Next.js build artifacts (legacy)
+.next/
+out/
+build/
+dist/
+
 # IDE
 .vscode/
 .idea/
