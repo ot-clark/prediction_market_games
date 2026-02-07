@@ -130,8 +130,9 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
             f_source = 'spot_fallback'
 
         # Black-76: d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
-        # P(expire ITM) = N(d2), not N(d1) - d2 gives risk-neutral prob of S_T > K
+        # Use N(d2) = Φ(d2) for probability (NOT d2 - d2 is in std-dev units)
         d1, d2 = calculate_black76_d1_d2(forward, target_price, strike_iv, time_years)
+        n_d2 = normal_cdf(d2)  # N(d2) = Φ(d2) = risk-neutral P(S_T > K)
 
         # Binary probability: N(d2) for "above", 1-N(d2) for "below"
         binary_prob = calculate_black76_probability_itm(
@@ -143,24 +144,46 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         else:
             probability = binary_prob
 
+        # Time extrapolation: we always use T = market expiry (not option expiry)
+        # When option expires before market, P(touch by T_market) > P(touch by T_option)
+        option_expiry_ts = iv_data.get('expiry_timestamp') if iv_data else None
+        option_expires_before_market = False
+        if option_expiry_ts and expiry_date:
+            from datetime import timezone
+            if hasattr(expiry_date, 'timestamp'):
+                market_ts = int(expiry_date.timestamp() * 1000)
+            else:
+                from dateutil.parser import parse
+                exp = parse(expiry_date) if isinstance(expiry_date, str) else expiry_date
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                market_ts = int(exp.timestamp() * 1000)
+            if option_expiry_ts < market_ts:
+                option_expires_before_market = True
+
         if 0 < probability < 1:
+            extrap_note = ''
+            if option_expires_before_market:
+                extrap_note = '\n  (Option expires before market; using market T → higher P(touch) with extra time)'
             deribit_prob = ProbabilityEstimate(
                 method='deribit-black76',
                 probability=probability,
                 volatility_used=strike_iv,
                 time_to_expiry=time_years,
-                delta=normal_cdf(d2),  # N(d2) is the ITM probability
+                delta=binary_prob,  # P(ITM) for our direction
                 math_breakdown={
-                    'formula': f'P({"touch" if bet_type == "one-touch" else "settle"}) = {"2 × " if bet_type == "one-touch" else ""}N(d2), Black-76',
+                    'formula': f'P = {"2 × " if bet_type == "one-touch" else ""}N(d2), where N(d2)=Φ(d2) is the CDF (probability), not d2',
                     'steps': [
                         f'Forward (F): ${forward:,.0f} (source: {f_source})',
                         f'Target (K): ${target_price:,.0f}',
                         f'Strike IV: {strike_iv * 100:.1f}% (source: {iv_source})',
-                        f'Time (T): {time_years:.4f} years',
+                        f'Time (T): {time_years:.4f} years (market expiry)',
                         f'd1 = [ln(F/K) + (σ²/2)T] / (σ√T) = {d1:.4f}',
-                        f'd2 = d1 - σ√T = {d2:.4f}',
-                        f'N(d2) = P(expire ITM) = {binary_prob:.4f}',
-                        f'Result: {probability * 100:.2f}%',
+                        f'd2 = d1 - σ√T = {d2:.4f} (std-dev units)',
+                        f'N(d2) = Φ(d2) = {n_d2:.4f} (P(S_T > K) for call)',
+                        f'P(settle) = {"1 - " if direction == "below" else ""}N(d2) = {binary_prob:.4f}',
+                        (f'P(touch) ≈ 2 × P(settle) = {probability:.4f}' if bet_type == 'one-touch' else f'P(settle) = {probability:.4f}'),
+                        f'Result: {probability * 100:.2f}%' + extrap_note,
                     ],
                     'result': probability,
                 }

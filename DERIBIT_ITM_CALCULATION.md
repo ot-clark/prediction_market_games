@@ -104,7 +104,7 @@ Where:
 - **Below target (put):**  
   \(P(S_T < K) = 1 - N(d_2)\)
 
-`N` is the standard normal CDF (`scipy.stats.norm.cdf`).
+`N` is the standard normal CDF (`scipy.stats.norm.cdf`), also written Φ. **We use N(d2), not d2** — d2 is in standard-deviation units; N(d2) is the probability.
 
 **Why N(d2)?** In Black-76, the risk-neutral probability of finishing in the money is N(d2). N(d1) is used for delta hedging; N(d2) is the probability of exercise.
 
@@ -123,6 +123,17 @@ Where:
   P(\text{touch}) \approx 2 \times P(\text{settle})
   \]
   Capped at 1.0.
+
+---
+
+### 7. Time Extrapolation (Option Expires Before Market)
+
+When the Deribit option expires **before** the Polymarket market (e.g. option Feb 20, market Feb 28):
+
+- **P(touch by T_market) > P(touch by T_option)** — more time increases the probability of hitting the barrier.
+- **Implementation:** We always use **T = market expiry** in the Black-76 formula, not the option’s expiry.
+- We use the option’s IV as the volatility for the full period to market expiry (flat volatility term structure).
+- This produces the probability of touching by the market’s expiry, which is the correct figure for Polymarket.
 
 ---
 
