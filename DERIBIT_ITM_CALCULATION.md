@@ -41,7 +41,7 @@ The Black-76 model uses the **forward price** \(F\) at expiry, not the spot pric
 
 ### 2. Get Implied Volatility (σ) for the Strike
 
-**In the code** (`data_fetchers.py` → `fetch_deribit_data`, `arbitrage_calculator.py` → `find_closest_strike_iv`):
+**In the code** (`data_fetchers.py` → `fetch_iv_for_market`):
 
 1. **ATM IV:** Deribit’s index price is used to find the ATM strike. ATM call IV is fetched from the ticker (`mark_iv`).
 
@@ -152,7 +152,7 @@ Extract: crypto=BTC, target_price=200000, direction=above, bet_type=one-touch
 fetch_deribit_data(BTC)     → index price, ATM IV, iv_by_strike
 fetch_deribit_forward_price(BTC, expiry, strike=200000) → forward F
         ↓
-find_closest_strike_iv(deribit, 200000) → strike IV σ
+fetch_iv_for_market(symbol, target_strike, expiry, direction) → strike IV σ (PUT for below, CALL for above)
         ↓
 time_to_expiry_years(expiry) → T
         ↓

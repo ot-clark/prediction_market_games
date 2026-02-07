@@ -397,17 +397,115 @@ def fetch_deribit_data(symbol: str) -> Optional[Dict]:
             iv_values = [d['call_iv'] for d in iv_by_strike.values() if d['call_iv'] > 0]
             if iv_values:
                 atm_iv = sum(iv_values) / len(iv_values)
-        
+
+        # Store instruments for on-demand IV lookup (strike + expiry matched to market)
         return {
             'symbol': currency,
             'underlying_price': underlying_price,
             'atm_iv': atm_iv or DEFAULT_VOLATILITY.get(currency, DEFAULT_VOLATILITY['DEFAULT']),
+            'instruments': relevant_instruments,
             'iv_by_strike': iv_by_strike,
             'last_updated': datetime.now(),
         }
     except Exception as e:
         print(f'Error fetching Deribit data for {symbol}: {e}')
         return None
+
+def fetch_iv_for_market(
+    symbol: str,
+    target_strike: float,
+    target_expiry,
+    direction: str,
+    deribit_data: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """
+    Fetch IV for the option that best matches the market:
+    - PUT for 'below' (dip/crash), CALL for 'above' (rally)
+    - Strike closest to target (from all available strikes)
+    - Expiry closest to target (e.g. end of Feb for Feb markets)
+
+    Returns dict with iv, instrument_name, strike, expiry_timestamp, option_type.
+    """
+    from datetime import timezone
+
+    if symbol.upper() not in DERIBIT_SUPPORTED:
+        return None
+
+    # Get instruments
+    instruments = []
+    if deribit_data and deribit_data.get('instruments'):
+        instruments = deribit_data['instruments']
+    else:
+        try:
+            resp = requests.get(
+                f'{DERIBIT_API}/get_instruments',
+                params={'currency': symbol.upper(), 'kind': 'option', 'expired': 'false'},
+                timeout=30
+            )
+            if resp.ok:
+                instruments = [i for i in resp.json().get('result', []) if i.get('is_active')]
+        except Exception:
+            pass
+
+    if not instruments:
+        return None
+
+    # Option type: PUT for below (downside bet), CALL for above (upside bet)
+    option_type = 'put' if direction == 'below' else 'call'
+
+    # Target expiry as timestamp (ms)
+    if hasattr(target_expiry, 'timestamp'):
+        target_ts = int(target_expiry.timestamp() * 1000)
+    else:
+        from dateutil.parser import parse
+        exp = parse(target_expiry) if isinstance(target_expiry, str) else target_expiry
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        target_ts = int(exp.timestamp() * 1000)
+
+    # Filter: option type, strike within 25% of target
+    strike_band = 0.25
+    candidates = [
+        i for i in instruments
+        if i.get('option_type') == option_type
+        and i.get('strike')
+        and abs(i['strike'] - target_strike) / max(target_strike, 1) <= strike_band
+    ]
+
+    if not candidates:
+        return None
+
+    # Sort by: 1) strike distance to target, 2) expiry distance to target
+    def score(inst):
+        strike_dist = abs(inst['strike'] - target_strike)
+        expiry_dist = abs(inst.get('expiration_timestamp', 0) - target_ts)
+        return (strike_dist, expiry_dist)
+
+    best = min(candidates, key=score)
+
+    try:
+        ticker_resp = requests.get(
+            f'{DERIBIT_API}/ticker',
+            params={'instrument_name': best['instrument_name']},
+            timeout=30
+        )
+        if not ticker_resp.ok:
+            return None
+        ticker = ticker_resp.json().get('result', {})
+        iv_pct = ticker.get('mark_iv') or ticker.get('iv', 0)
+        iv = (iv_pct or 0) / 100
+        if iv <= 0:
+            return None
+        return {
+            'iv': iv,
+            'instrument_name': best['instrument_name'],
+            'strike': best['strike'],
+            'expiry_timestamp': best.get('expiration_timestamp'),
+            'option_type': option_type,
+        }
+    except Exception:
+        return None
+
 
 def get_order_book(token_id: str) -> Optional[Dict]:
     """

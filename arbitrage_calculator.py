@@ -16,6 +16,7 @@ from data_fetchers import (
     fetch_crypto_prices,
     fetch_deribit_data,
     fetch_deribit_forward_price,
+    fetch_iv_for_market,
 )
 from crypto_math import (
     calculate_black76_probability_itm,
@@ -104,58 +105,66 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         
         # Calculate Deribit-based probability (Black-76 model with N(d2))
         # Uses forward price F (from Deribit future or synthetic F=C-P+K), not spot
+        # IV from PUT for 'below' (dip), CALL for 'above'; strike + expiry matched to market
         deribit_prob = None
-        iv_data = find_closest_strike_iv(deribit, target_price, expiry_date)
-        if iv_data and iv_data['iv'] > 0:
+        iv_data = fetch_iv_for_market(
+            market['crypto'], target_price, expiry_date, direction, deribit
+        )
+        if iv_data and iv_data.get('iv', 0) > 0:
             strike_iv = iv_data['iv']
+            iv_source = f"{iv_data.get('option_type', 'option').upper()} {iv_data.get('instrument_name', '')}"
+        else:
+            # Fallback: ATM IV from deribit
+            strike_iv = deribit.get('atm_iv') or DEFAULT_VOLATILITY.get(market['crypto'], 0.55)
+            iv_source = 'ATM fallback'
 
-            # Get forward F: prefer Deribit future, else synthetic F=C-P+K, else fallback to spot
-            forward_data = fetch_deribit_forward_price(
-                market['crypto'], expiry_date, strike=target_price
+        # Get forward F: prefer Deribit future, else synthetic F=C-P+K, else fallback to spot
+        forward_data = fetch_deribit_forward_price(
+            market['crypto'], expiry_date, strike=target_price
+        )
+        if forward_data and forward_data.get('forward'):
+            forward = forward_data['forward']
+            f_source = forward_data.get('source', 'unknown')
+        else:
+            forward = current_price  # Fallback: F ≈ S for short-dated
+            f_source = 'spot_fallback'
+
+        # Black-76: d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
+        # P(expire ITM) = N(d2), not N(d1) - d2 gives risk-neutral prob of S_T > K
+        d1, d2 = calculate_black76_d1_d2(forward, target_price, strike_iv, time_years)
+
+        # Binary probability: N(d2) for "above", 1-N(d2) for "below"
+        binary_prob = calculate_black76_probability_itm(
+            forward, target_price, strike_iv, time_years, direction
+        )
+
+        if bet_type == 'one-touch':
+            probability = min(1.0, 2 * binary_prob)
+        else:
+            probability = binary_prob
+
+        if 0 < probability < 1:
+            deribit_prob = ProbabilityEstimate(
+                method='deribit-black76',
+                probability=probability,
+                volatility_used=strike_iv,
+                time_to_expiry=time_years,
+                delta=normal_cdf(d2),  # N(d2) is the ITM probability
+                math_breakdown={
+                    'formula': f'P({"touch" if bet_type == "one-touch" else "settle"}) = {"2 × " if bet_type == "one-touch" else ""}N(d2), Black-76',
+                    'steps': [
+                        f'Forward (F): ${forward:,.0f} (source: {f_source})',
+                        f'Target (K): ${target_price:,.0f}',
+                        f'Strike IV: {strike_iv * 100:.1f}% (source: {iv_source})',
+                        f'Time (T): {time_years:.4f} years',
+                        f'd1 = [ln(F/K) + (σ²/2)T] / (σ√T) = {d1:.4f}',
+                        f'd2 = d1 - σ√T = {d2:.4f}',
+                        f'N(d2) = P(expire ITM) = {binary_prob:.4f}',
+                        f'Result: {probability * 100:.2f}%',
+                    ],
+                    'result': probability,
+                }
             )
-            if forward_data and forward_data.get('forward'):
-                forward = forward_data['forward']
-                f_source = forward_data.get('source', 'unknown')
-            else:
-                forward = current_price  # Fallback: F ≈ S for short-dated
-                f_source = 'spot_fallback'
-
-            # Black-76: d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
-            # P(expire ITM) = N(d2), not N(d1) - d2 gives risk-neutral prob of S_T > K
-            d1, d2 = calculate_black76_d1_d2(forward, target_price, strike_iv, time_years)
-
-            # Binary probability: N(d2) for "above", 1-N(d2) for "below"
-            binary_prob = calculate_black76_probability_itm(
-                forward, target_price, strike_iv, time_years, direction
-            )
-
-            if bet_type == 'one-touch':
-                probability = min(1.0, 2 * binary_prob)
-            else:
-                probability = binary_prob
-
-            if 0 < probability < 1:
-                deribit_prob = ProbabilityEstimate(
-                    method='deribit-black76',
-                    probability=probability,
-                    volatility_used=strike_iv,
-                    time_to_expiry=time_years,
-                    delta=normal_cdf(d2),  # N(d2) is the ITM probability
-                    math_breakdown={
-                        'formula': f'P({"touch" if bet_type == "one-touch" else "settle"}) = {"2 × " if bet_type == "one-touch" else ""}N(d2), Black-76',
-                        'steps': [
-                            f'Forward (F): ${forward:,.0f} (source: {f_source})',
-                            f'Target (K): ${target_price:,.0f}',
-                            f'Strike IV: {strike_iv * 100:.1f}%',
-                            f'Time (T): {time_years:.4f} years',
-                            f'd1 = [ln(F/K) + (σ²/2)T] / (σ√T) = {d1:.4f}',
-                            f'd2 = d1 - σ√T = {d2:.4f}',
-                            f'N(d2) = P(expire ITM) = {binary_prob:.4f}',
-                            f'Result: {probability * 100:.2f}%',
-                        ],
-                        'result': probability,
-                    }
-                )
         
         # Only add opportunity if we have valid Deribit probability
         if not deribit_prob:
@@ -197,36 +206,4 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         'last_updated': datetime.now(),
     }
 
-def find_closest_strike_iv(deribit: Dict, target_strike: float, target_expiry) -> Optional[Dict]:
-    """
-    Find the closest strike IV from Deribit data
-    """
-    import math
-    
-    iv_by_strike = deribit.get('iv_by_strike', {})
-    if not iv_by_strike:
-        # Fall back to ATM IV
-        return {
-            'iv': deribit.get('atm_iv', DEFAULT_VOLATILITY.get('BTC', 0.55)),
-            'delta': None,
-        }
-    
-    # Find the strike closest to our target
-    strikes = list(iv_by_strike.keys())
-    closest = min(strikes, key=lambda s: abs(s - target_strike))
-    
-    data = iv_by_strike[closest]
-    if not data:
-        return {
-            'iv': deribit.get('atm_iv', DEFAULT_VOLATILITY.get('BTC', 0.55)),
-            'delta': None,
-        }
-    
-    # Only use the delta if the strike is close to our target (within 20%)
-    strike_is_close = abs(closest - target_strike) / target_strike < 0.2
-    
-    return {
-        'iv': data.get('call_iv') or deribit.get('atm_iv', DEFAULT_VOLATILITY.get('BTC', 0.55)),
-        'delta': data.get('call_delta') if strike_is_close and data.get('call_delta') else None,
-    }
 
