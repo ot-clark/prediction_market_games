@@ -212,7 +212,10 @@ cat > data/bot_state.json << 'EOF'
     "poll_interval_seconds": 60,
     "max_positions_per_market": 1,
     "min_time_to_expiry_days": 1
-  }
+  },
+  "daily_equity_log": {},
+  "daily_returns": [],
+  "last_recorded_date": null
 }
 EOF
 sudo systemctl start prediction-bot
