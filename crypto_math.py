@@ -11,7 +11,7 @@ https://moontower.substack.com/p/from-everything-computer-to-everything
 import math
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.stats import norm
 
 # ============================================================================
@@ -38,10 +38,17 @@ def normal_inverse_cdf(p: float) -> float:
 # TIME CALCULATIONS
 # ============================================================================
 
+def _ensure_aware(dt):
+    """Ensure datetime is timezone-aware (UTC). Naive datetimes treated as UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def time_to_expiry_years(expiry_date, from_date=None):
     """Calculate time to expiry in years"""
     if from_date is None:
-        from_date = datetime.now()
+        from_date = datetime.now(timezone.utc)
     
     if isinstance(expiry_date, str):
         from dateutil.parser import parse
@@ -50,6 +57,8 @@ def time_to_expiry_years(expiry_date, from_date=None):
         from dateutil.parser import parse
         from_date = parse(from_date)
     
+    expiry_date = _ensure_aware(expiry_date)
+    from_date = _ensure_aware(from_date)
     diff_ms = (expiry_date - from_date).total_seconds() * 1000
     ms_per_year = 365.25 * 24 * 60 * 60 * 1000
     return max(0, diff_ms / ms_per_year)
@@ -57,7 +66,7 @@ def time_to_expiry_years(expiry_date, from_date=None):
 def time_to_expiry_days(expiry_date, from_date=None):
     """Calculate time to expiry in days"""
     if from_date is None:
-        from_date = datetime.now()
+        from_date = datetime.now(timezone.utc)
     
     if isinstance(expiry_date, str):
         from dateutil.parser import parse
@@ -66,27 +75,11 @@ def time_to_expiry_days(expiry_date, from_date=None):
         from dateutil.parser import parse
         from_date = parse(from_date)
     
+    expiry_date = _ensure_aware(expiry_date)
+    from_date = _ensure_aware(from_date)
     diff_ms = (expiry_date - from_date).total_seconds() * 1000
     ms_per_day = 24 * 60 * 60 * 1000
     return max(0, diff_ms / ms_per_day)
-
-# ============================================================================
-# Z-SCORE METHOD
-# ============================================================================
-
-def calculate_z_score(current_price: float, target_price: float, volatility: float, time_years: float) -> float:
-    """
-    Calculate the z-score (number of standard deviations) for a price target
-    
-    Formula: z = ln(target/current) / (σ × √T)
-    """
-    if current_price <= 0 or target_price <= 0 or volatility <= 0 or time_years <= 0:
-        return float('inf') if target_price > current_price else float('-inf')
-    
-    log_return = math.log(target_price / current_price)
-    scaled_vol = volatility * math.sqrt(time_years)
-    
-    return log_return / scaled_vol
 
 @dataclass
 class ProbabilityEstimate:
@@ -99,124 +92,57 @@ class ProbabilityEstimate:
     delta: Optional[float] = None
     math_breakdown: Optional[Dict] = None
 
-def calculate_z_score_probability(
-    current_price: float,
-    target_price: float,
-    volatility: float,
-    time_years: float
-) -> ProbabilityEstimate:
-    """
-    Calculate probability of price exceeding target using z-score method
-    (Binary "settle above" bet)
-    """
-    z_score = calculate_z_score(current_price, target_price, volatility, time_years)
-    
-    # P(price > target) = 1 - Φ(z)
-    probability = 1 - normal_cdf(z_score)
-    
-    # Build math breakdown
-    log_return = math.log(target_price / current_price)
-    scaled_vol = volatility * math.sqrt(time_years)
-    
-    math_breakdown = {
-        'formula': 'P(S_T > K) = 1 - Φ(z), where z = ln(K/S) / (σ√T)',
-        'steps': [
-            f'Current price (S): ${current_price:,.0f}',
-            f'Target price (K): ${target_price:,.0f}',
-            f'Volatility (σ): {volatility * 100:.1f}%',
-            f'Time to expiry (T): {time_years:.4f} years ({int(time_years * 365)} days)',
-            '',
-            'Step 1: Calculate log return',
-            f'  ln(K/S) = ln({target_price}/{current_price}) = {log_return:.4f}',
-            '',
-            'Step 2: Scale volatility by √T',
-            f'  σ√T = {volatility:.3f} × √{time_years:.4f} = {scaled_vol:.4f}',
-            '',
-            'Step 3: Calculate z-score',
-            f'  z = {log_return:.4f} / {scaled_vol:.4f} = {z_score:.4f}',
-            '',
-            'Step 4: Convert to probability',
-            f'  P(S > K) = 1 - Φ({z_score:.4f}) = 1 - {normal_cdf(z_score):.4f} = {probability:.4f}',
-            '',
-            f'Result: {probability * 100:.2f}% probability of exceeding target',
-        ],
-        'result': probability,
-    }
-    
-    return ProbabilityEstimate(
-        method='zscore',
-        probability=probability,
-        volatility_used=volatility,
-        time_to_expiry=time_years,
-        z_score=z_score,
-        math_breakdown=math_breakdown
-    )
+# ============================================================================
+# BLACK-76 MODEL (options on futures - matches Deribit)
+# ============================================================================
 
-def calculate_one_touch_probability(
-    current_price: float,
-    target_price: float,
+def calculate_black76_d1_d2(
+    forward: float,
+    strike: float,
     volatility: float,
     time_years: float
-) -> ProbabilityEstimate:
+) -> Tuple[float, float]:
     """
-    Calculate probability of price touching target at any point before expiry
-    (One-touch bet)
-    
-    Trader's rule of thumb: P(touch) ≈ 2 × Delta of vanilla option
+    Black-76 model d1 and d2 (options on futures).
+    Deribit uses Black-76 with forward prices.
+
+    d1 = [ln(F/K) + (σ²/2)T] / (σ√T)
+    d2 = d1 - σ√T
+
+    N(d2) = risk-neutral probability of expiring ITM (S_T > K for call).
     """
-    z_score = calculate_z_score(current_price, target_price, volatility, time_years)
-    
-    # Determine if this is upward or downward touch
-    is_upward = target_price > current_price
-    
-    # For upward: P(touch) = 2 × P(settle above) = 2 × (1 - Φ(z))
-    # For downward: P(touch) = 2 × P(settle below) = 2 × Φ(z)
-    binary_prob = (1 - normal_cdf(z_score)) if is_upward else normal_cdf(z_score)
-    
-    # One-touch approximation: 2 × binary probability, capped at 1.0
-    one_touch_prob = min(1.0, 2 * binary_prob)
-    
-    direction = 'upward' if is_upward else 'downward'
-    settle_direction = 'above' if is_upward else 'below'
-    
-    math_breakdown = {
-        'formula': f'P(touch {"up" if is_upward else "down"}) ≈ 2 × P(S_T {" > " if is_upward else " < "} K)',
-        'steps': [
-            f'Current price (S): ${current_price:,.0f}',
-            f'Target price (K): ${target_price:,.0f}',
-            f'Direction: {direction} (target {" > " if is_upward else " < "} current)',
-            f'Volatility (σ): {volatility * 100:.1f}%',
-            f'Time to expiry (T): {time_years:.4f} years ({int(time_years * 365)} days)',
-            '',
-            'Step 1: Calculate z-score',
-            f'  z = ln(K/S) / (σ√T) = {z_score:.4f}',
-            '',
-            f'Step 2: Calculate binary probability (settle {settle_direction})',
-            f'  P(settle {settle_direction}) = {binary_prob:.4f}',
-            '',
-            'Step 3: Apply one-touch rule (2x multiplier)',
-            f'  P(touch) ≈ 2 × {binary_prob:.4f} = {2 * binary_prob:.4f}',
-            f'  Capped at 100%' if one_touch_prob < 2 * binary_prob else '',
-            '',
-            f'Result: {one_touch_prob * 100:.2f}% probability of touching ${target_price:,.0f}',
-        ],
-        'result': one_touch_prob,
-    }
-    
-    # Filter out empty strings
-    math_breakdown['steps'] = [s for s in math_breakdown['steps'] if s]
-    
-    return ProbabilityEstimate(
-        method='zscore',
-        probability=one_touch_prob,
-        volatility_used=volatility,
-        time_to_expiry=time_years,
-        z_score=z_score,
-        math_breakdown=math_breakdown
-    )
+    if time_years <= 0 or volatility <= 0 or forward <= 0 or strike <= 0:
+        return 0.0, 0.0
+
+    sqrt_t = math.sqrt(time_years)
+    d1 = (math.log(forward / strike) + 0.5 * volatility * volatility * time_years) / (volatility * sqrt_t)
+    d2 = d1 - volatility * sqrt_t
+
+    return d1, d2
+
+
+def calculate_black76_probability_itm(
+    forward: float,
+    strike: float,
+    volatility: float,
+    time_years: float,
+    direction: str = 'above'
+) -> float:
+    """
+    Risk-neutral probability of expiring in the money using Black-76.
+    Uses N(d2), not N(d1) - d2 gives P(S_T > K), d1 is for delta/hedge ratio.
+
+    direction: 'above' -> P(S_T > K) = N(d2), 'below' -> P(S_T < K) = 1 - N(d2)
+    """
+    d1, d2 = calculate_black76_d1_d2(forward, strike, volatility, time_years)
+    if direction == 'above':
+        return normal_cdf(d2)
+    else:
+        return 1 - normal_cdf(d2)
+
 
 # ============================================================================
-# DELTA-BASED PROBABILITY (using Deribit data)
+# DELTA-BASED PROBABILITY (legacy Black-Scholes - kept for reference)
 # ============================================================================
 
 def calculate_d1_d2(
@@ -310,13 +236,15 @@ def parse_crypto_market_question(question: str) -> Optional[Dict]:
     from datetime import datetime
     
     q = question.lower()
-    
-    # Exclusion patterns - skip markets that aren't about crypto spot prices
-    exclusion_patterns = [
+
+    # 1. Non-spot market indicators - skip FDV, market cap, TVL, etc.
+    non_spot_patterns = [
         r'market\s*cap',
+        r'marketcap',
         r'\bfdv\b',
         r'\btvl\b',
         r'\bmcap\b',
+        r'fully\s*diluted',
         r'dominance',
         r'\bfee[s]?\b',
         r'\bgas\b',
@@ -324,17 +252,33 @@ def parse_crypto_market_question(question: str) -> Optional[Dict]:
         r'\bairdrop\b',
         r'\betf\b',
         r'\bhalving\b',
+    ]
+    for pattern in non_spot_patterns:
+        if re.search(pattern, q):
+            return None
+
+    # 2. Compound/derivative tokens - must exclude BEFORE matching ETH/BTC
+    # These contain "eth"/"btc" but are different assets (MegaETH, wETH, stETH, etc.)
+    compound_token_patterns = [
         r'mega\s*eth',
+        r'megaeth',
         r'\bweth\b',
         r'\bsteth\b',
         r'\breth\b',
         r'\bcbeth\b',
+        r'\bwsteth\b',
+        r'\bwbtc\b',
+        r'\btbtc\b',
+        r'\brbtc\b',
     ]
-    
-    for pattern in exclusion_patterns:
-        if re.search(pattern, question, re.IGNORECASE):
+    for pattern in compound_token_patterns:
+        if re.search(pattern, q):
             return None
-    
+
+    # 3. If question has FDV/mcap/market cap context but escaped above, extra guard
+    if re.search(r'\$\d+[bm]\b', q) and re.search(r'(fdv|mcap|market\s*cap|valuation)', q):
+        return None
+
     # Check if this is a crypto price market
     crypto_patterns = [
         (r'\bbitcoin\b|\bbtc\b', 'BTC'),

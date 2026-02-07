@@ -37,7 +37,7 @@ The bot will:
 
 ### Production Deployment
 
-See **[DEPLOYMENT.md](DEPLOYMENT.md)** for complete production setup instructions.
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for complete production setup: [AWS Lightsail](DEPLOYMENT.md#deploying-on-aws-lightsail-step-by-step) (step-by-step) and [EC2 Console / launch wizard](DEPLOYMENT.md#deploying-on-ec2-console--launch-wizard) (image, instance type, key pair, network, storage).
 
 Quick version:
 ```bash

@@ -11,7 +11,7 @@ It is a paper trading bot that simulates trades without using real money.
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from pathlib import Path
 from arbitrage_calculator import calculate_arbitrage_opportunities
@@ -34,6 +34,7 @@ CONFIG = {
 }
 
 STATE_FILE = Path('data/bot_state.json')
+DAILY_RETURNS_FILE = Path('data/daily_returns.csv')
 
 # ============================================================================
 # STATE MANAGEMENT
@@ -54,6 +55,10 @@ def load_state() -> Dict:
                         position['entry_timestamp'] = datetime.fromisoformat(position['entry_timestamp'])
                     if 'close_timestamp' in position:
                         position['close_timestamp'] = datetime.fromisoformat(position['close_timestamp'])
+                # Ensure daily returns fields exist (for older state files)
+                state.setdefault('daily_equity_log', {})
+                state.setdefault('daily_returns', [])
+                state.setdefault('last_recorded_date', None)
                 return state
     except Exception as e:
         print(f'Error loading state: {e}')
@@ -73,6 +78,9 @@ def load_state() -> Dict:
         'losing_trades': 0,
         'win_rate': 0,
         'config': CONFIG,
+        'daily_equity_log': {},
+        'daily_returns': [],
+        'last_recorded_date': None,
     }
 
 def save_state(state: Dict):
@@ -102,10 +110,85 @@ def get_total_exposure(positions: List[Dict]) -> float:
     """Calculate total exposure from all positions"""
     return sum(p['size'] for p in positions)
 
+def get_mark_to_market_equity(state: Dict) -> float:
+    """Mark-to-market portfolio equity: balance + position cost + unrealized P&L"""
+    equity = state['current_balance']
+    for p in state.get('open_positions', []):
+        equity += p.get('size', 0) + p.get('unrealized_pnl', 0)
+    return equity
+
+def record_daily_return(state: Dict, current_equity: float):
+    """
+    Record mark-to-market equity at end of day. When we transition to a new day,
+    compute yesterday's daily return and append to log.
+    """
+    now = datetime.now(timezone.utc)
+    current_date = now.strftime('%Y-%m-%d')
+    last_date = state.get('last_recorded_date')
+
+    # Ensure we have daily_equity_log and daily_returns
+    if 'daily_equity_log' not in state:
+        state['daily_equity_log'] = {}
+    if 'daily_returns' not in state:
+        state['daily_returns'] = []
+
+    # Store today's equity (overwrites if multiple cycles same day - keeps latest)
+    state['daily_equity_log'][current_date] = current_equity
+
+    if last_date is None:
+        state['last_recorded_date'] = current_date
+        return
+
+    if current_date == last_date:
+        return
+
+    # New day: compute yesterday's return and log it
+    prev_equity = state['daily_equity_log'].get(last_date)
+    if prev_equity is not None and prev_equity > 0:
+        daily_return = (current_equity - prev_equity) / prev_equity
+        state['daily_returns'].append({
+            'date': last_date,
+            'equity': current_equity,
+            'prev_equity': prev_equity,
+            'daily_return': daily_return,
+        })
+
+        # Append to CSV log file
+        try:
+            DAILY_RETURNS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            file_exists = DAILY_RETURNS_FILE.exists()
+            with open(DAILY_RETURNS_FILE, 'a') as f:
+                if not file_exists:
+                    f.write('date,prev_equity,equity,daily_return_pct\n')
+                f.write(f'{last_date},{prev_equity:.2f},{current_equity:.2f},{daily_return * 100:.4f}\n')
+        except Exception as e:
+            print(f'Warning: Could not write daily returns log: {e}')
+
+        print(f'\n📅 DAILY RETURN RECORDED: {last_date} → {daily_return * 100:+.2f}% (equity ${prev_equity:.2f} → ${current_equity:.2f})')
+
+    state['last_recorded_date'] = current_date
+
+def calculate_sharpe_ratio(daily_returns: List[Dict], risk_free_rate: float = 0) -> Optional[float]:
+    """
+    Annualized Sharpe ratio. Assumes 252 trading days.
+    Returns None if fewer than 2 returns.
+    """
+    if not daily_returns or len(daily_returns) < 2:
+        return None
+    returns = [r['daily_return'] for r in daily_returns]
+    mean_r = sum(returns) / len(returns)
+    variance = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+    std_r = variance ** 0.5
+    if std_r == 0:
+        return None
+    sharpe_daily = (mean_r - risk_free_rate / 252) / std_r
+    return sharpe_daily * (252 ** 0.5)
+
 def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
     """Determine if we should enter a position"""
-    # Use Deribit edge if available, otherwise Z-score
-    edge = opp.get('edge_vs_deribit') or opp.get('edge_vs_zscore')
+    edge = opp.get('edge_vs_deribit')
+    if edge is None:
+        return {'should_enter': False, 'side': 'long', 'edge': 0, 'reason': 'No Deribit edge available'}
     abs_edge = abs(edge)
     
     # SAFETY CHECK 1: Skip essentially resolved markets (>99% or <1%)
@@ -128,12 +211,13 @@ def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
             return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Target already hit: current ${current_crypto_price:,.0f} >= target ${target_price:,.0f}'}
     
     # SAFETY CHECK 3: Sanity check model probability vs market price
-    model_prob = opp.get('deribit_prob', {}).get('probability') or opp.get('zscore_prob', {}).get('probability')
-    if model_prob:
-        if model_prob > 0.90 and poly_price > 0.90:
-            return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Both model ({model_prob * 100:.0f}%) and market ({poly_price * 100:.0f}%) agree at high probability'}
-        if model_prob < 0.10 and poly_price < 0.10:
-            return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Both model ({model_prob * 100:.0f}%) and market ({poly_price * 100:.0f}%) agree at low probability'}
+    model_prob = (opp.get('deribit_prob') or {}).get('probability')
+    if model_prob is None:
+        return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': 'No model probability'}
+    if model_prob > 0.90 and poly_price > 0.90:
+        return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Both model ({model_prob * 100:.0f}%) and market ({poly_price * 100:.0f}%) agree at high probability'}
+    if model_prob < 0.10 and poly_price < 0.10:
+        return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Both model ({model_prob * 100:.0f}%) and market ({poly_price * 100:.0f}%) agree at low probability'}
     
     # Check minimum edge
     if abs_edge < config['min_edge_to_enter']:
@@ -144,8 +228,9 @@ def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
     if isinstance(expiry_date, str):
         from dateutil.parser import parse
         expiry_date = parse(expiry_date)
-    
-    days_to_expiry = (expiry_date - datetime.now()).days
+    if expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    days_to_expiry = (expiry_date - datetime.now(timezone.utc)).days
     if days_to_expiry < config['min_time_to_expiry_days']:
         return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Only {days_to_expiry} days to expiry'}
     
@@ -179,8 +264,9 @@ def should_exit_position(position: Dict, opp: Optional[Dict], config: Dict) -> D
         if isinstance(expiry_date, str):
             from dateutil.parser import parse
             expiry_date = parse(expiry_date)
-        
-        if expiry_date < datetime.now():
+        if expiry_date.tzinfo is None:
+            expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+        if expiry_date < datetime.now(timezone.utc):
             return {
                 'should_exit': True,
                 'reason': 'expired',
@@ -190,7 +276,7 @@ def should_exit_position(position: Dict, opp: Optional[Dict], config: Dict) -> D
         return {'should_exit': False, 'reason': '', 'current_price': position['current_price'], 'current_edge': position['current_edge']}
     
     current_price = opp['polymarket_prob']
-    current_edge = opp.get('edge_vs_deribit') or opp.get('edge_vs_zscore')
+    current_edge = opp.get('edge_vs_deribit')
     abs_edge = abs(current_edge)
     
     # Check if edge has aligned (dropped below threshold)
@@ -239,8 +325,7 @@ def open_position(opp: Dict, side: str, edge: float, state: Dict, config: Dict) 
         'size': size,
         'shares': shares,
         'entry_edge': edge,
-        'entry_zscore_prob': opp['zscore_prob']['probability'],
-        'entry_deribit_prob': opp.get('deribit_prob', {}).get('probability'),
+        'entry_deribit_prob': (opp.get('deribit_prob') or {}).get('probability'),
         'entry_timestamp': datetime.now(),
         'current_price': entry_price,
         'current_edge': edge,
@@ -260,8 +345,7 @@ def open_position(opp: Dict, side: str, edge: float, state: Dict, config: Dict) 
         'size': size,
         'shares': shares,
         'edge': edge,
-        'zscore_prob': opp['zscore_prob']['probability'],
-        'deribit_prob': opp.get('deribit_prob', {}).get('probability'),
+        'deribit_prob': (opp.get('deribit_prob') or {}).get('probability'),
         'crypto_price': opp['current_price']['price'],
     }
     
@@ -332,7 +416,7 @@ def update_open_positions(opportunities: List[Dict], state: Dict):
         opp = next((o for o in opportunities if o['market']['id'] == position['market_id']), None)
         if opp:
             position['current_price'] = opp['polymarket_prob']
-            position['current_edge'] = opp.get('edge_vs_deribit') or opp.get('edge_vs_zscore')
+            position['current_edge'] = opp.get('edge_vs_deribit')
             
             # Calculate unrealized P&L
             if position['side'] == 'long':
@@ -417,14 +501,20 @@ def run_bot_cycle(state: Dict):
         # Update state
         state['last_update'] = datetime.now().isoformat()
         state['last_error'] = None
-        
+
+        # Mark-to-market equity and daily returns
+        current_equity = get_mark_to_market_equity(state)
+        record_daily_return(state, current_equity)
+
         # Calculate returns
         total_unrealized_pnl = sum(p.get('unrealized_pnl', 0) for p in state['open_positions'])
         total_pnl = state['total_pnl'] + total_unrealized_pnl
         starting_balance = state.get('starting_balance', CONFIG['starting_balance'])
-        current_equity = state['current_balance'] + sum(p.get('size', 0) for p in state['open_positions'])
         total_return = ((current_equity - starting_balance) / starting_balance * 100) if starting_balance > 0 else 0
-        
+
+        # Sharpe ratio (annualized, from daily returns)
+        sharpe = calculate_sharpe_ratio(state.get('daily_returns', []))
+
         # Log summary
         print(f'\n{"="*60}')
         print(f'📊 PORTFOLIO SUMMARY')
@@ -433,11 +523,17 @@ def run_bot_cycle(state: Dict):
         print(f'📈 Open Positions: {len(state["open_positions"])}')
         print(f'   Total Exposure: ${sum(p.get("size", 0) for p in state["open_positions"]):.2f}')
         print(f'   Unrealized P&L: ${total_unrealized_pnl:.2f}')
+        print(f'   Mark-to-Market Equity: ${current_equity:.2f}')
         print(f'💵 Realized P&L: ${state["total_pnl"]:.2f}')
         print(f'📊 Total P&L: ${total_pnl:.2f}')
         print(f'📉 Total Return: {total_return:+.2f}%')
+        if sharpe is not None:
+            print(f'📈 Sharpe Ratio (ann.): {sharpe:.2f}')
+        else:
+            print(f'📈 Sharpe Ratio (ann.): N/A (need 2+ days of returns)')
         print(f'🎯 Win Rate: {state["win_rate"] * 100:.1f}% ({state["winning_trades"]}W / {state["losing_trades"]}L)')
         print(f'📝 Total Trades: {state["total_trades"]}')
+        print(f'📅 Daily Returns: {len(state.get("daily_returns", []))} days recorded')
         print(f'{"="*60}')
         
         # Show open positions detail
@@ -485,9 +581,9 @@ def start_bot():
     
     # Show current state
     starting_balance = state.get('starting_balance', CONFIG['starting_balance'])
-    current_equity = state['current_balance'] + sum(p.get('size', 0) for p in state['open_positions'])
+    current_equity = get_mark_to_market_equity(state)
     total_return = ((current_equity - starting_balance) / starting_balance * 100) if starting_balance > 0 else 0
-    
+
     print('\n📊 CURRENT STATE:')
     print(f'   Balance: ${state["current_balance"]:.2f}')
     print(f'   Open Positions: {len(state["open_positions"])}')
@@ -520,16 +616,20 @@ def start_bot():
         
         # Final summary
         starting_balance = state.get('starting_balance', CONFIG['starting_balance'])
-        current_equity = state['current_balance'] + sum(p.get('size', 0) for p in state['open_positions'])
+        current_equity = get_mark_to_market_equity(state)
         total_return = ((current_equity - starting_balance) / starting_balance * 100) if starting_balance > 0 else 0
-        
+        sharpe = calculate_sharpe_ratio(state.get('daily_returns', []))
+
         print(f'\n📊 FINAL SUMMARY:')
         print(f'   Starting Balance: ${starting_balance:.2f}')
         print(f'   Current Equity: ${current_equity:.2f}')
         print(f'   Total Return: {total_return:+.2f}%')
         print(f'   Realized P&L: ${state["total_pnl"]:.2f}')
+        if sharpe is not None:
+            print(f'   Sharpe Ratio (ann.): {sharpe:.2f}')
         print(f'   Win Rate: {state["win_rate"] * 100:.1f}%')
         print(f'   Total Trades: {state["total_trades"]}')
+        print(f'   Daily Returns: {len(state.get("daily_returns", []))} days')
         print(f'\n💾 State saved to {STATE_FILE}')
         print('👋 Goodbye!')
         print('='*60 + '\n')

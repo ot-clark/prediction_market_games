@@ -89,7 +89,9 @@ def calculate_position_size(edge: float, config: Dict, remaining_exposure: float
 
 def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
     """Determine if we should enter a position"""
-    edge = opp.get('edge_vs_deribit') or opp.get('edge_vs_zscore')
+    edge = opp.get('edge_vs_deribit')
+    if edge is None:
+        return {'should_enter': False, 'side': 'long', 'edge': 0, 'size': 0, 'reason': 'No Deribit edge available'}
     abs_edge = abs(edge)
     poly_price = opp['polymarket_prob']
     
@@ -151,7 +153,7 @@ def should_exit_position(position: Dict, opportunities: List[Dict], config: Dict
     if not opp:
         return {'should_exit': False, 'reason': 'No opportunity data available'}
     
-    current_edge = opp.get('edge_vs_deribit') or opp.get('edge_vs_zscore')
+    current_edge = opp.get('edge_vs_deribit')
     abs_current_edge = abs(current_edge)
     current_price = opp['polymarket_prob']
     

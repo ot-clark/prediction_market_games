@@ -28,8 +28,10 @@ The bot performs the following steps:
    - **Z-Score Method**: Uses lognormal distribution to calculate probability of price reaching target
      - Formula: `z = ln(target/current) / (σ × √T)`
      - Probability = 1 - Φ(z) for "above" bets
-   - **Deribit Method** (when available): Uses Black-Scholes delta from options data
-     - More accurate for BTC/ETH as it uses market-implied volatility
+   - **Deribit Method** (Black-76, when available): Uses options-on-futures model matching Deribit
+     - Forward F from Deribit future (same expiry) or synthetic F = C - P + K
+     - d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
+     - P(expire ITM) = N(d2), not N(d1) - d2 is the risk-neutral probability
    - **One-Touch Adjustments**: For "touch" bets, multiplies probability by 2x (path-dependent)
 
 5. **Calculates Trading Edge**

@@ -168,6 +168,114 @@ def fetch_crypto_prices(symbols: List[str]) -> Dict[str, Dict]:
     
     return prices
 
+def fetch_deribit_forward_price(
+    symbol: str,
+    expiry_date,
+    strike: Optional[float] = None,
+    deribit_data: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """
+    Get forward price F for Black-76 model.
+    1. Prefer Deribit future expiring on same date as option/market
+    2. Fallback: synthetic forward via put-call parity F = C - P + K
+
+    Returns dict with 'forward', 'source' ('future' or 'synthetic'), or None.
+    """
+    if symbol.upper() not in DERIBIT_SUPPORTED:
+        return None
+
+    currency = symbol.upper()
+    from datetime import timezone
+
+    # Normalize expiry to timestamp (ms)
+    if hasattr(expiry_date, 'timestamp'):
+        target_ts = int(expiry_date.timestamp() * 1000)
+    else:
+        from dateutil.parser import parse
+        exp = parse(expiry_date) if isinstance(expiry_date, str) else expiry_date
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        target_ts = int(exp.timestamp() * 1000)
+
+    try:
+        # 1. Try futures first
+        instruments_response = requests.get(
+            f'{DERIBIT_API}/get_instruments',
+            params={'currency': currency, 'kind': 'future', 'expired': 'false'},
+            timeout=30
+        )
+        if instruments_response.ok:
+            instruments = instruments_response.json().get('result', [])
+            # Exclude perpetual (huge expiration_timestamp)
+            perpetual_ts_threshold = 32503680000000  # ~year 3000
+            dated_futures = [i for i in instruments
+                            if i.get('is_active') and i.get('expiration_timestamp', 0) < perpetual_ts_threshold]
+
+            if dated_futures:
+                # Find future with expiry closest to target (within 7 days)
+                best = None
+                best_diff = float('inf')
+                for f in dated_futures:
+                    exp_ts = f.get('expiration_timestamp', 0)
+                    diff = abs(exp_ts - target_ts)
+                    if diff < 7 * 24 * 60 * 60 * 1000 and diff < best_diff:
+                        best_diff = diff
+                        best = f
+
+                if best:
+                    ticker_response = requests.get(
+                        f'{DERIBIT_API}/ticker',
+                        params={'instrument_name': best['instrument_name']},
+                        timeout=30
+                    )
+                    if ticker_response.ok:
+                        ticker = ticker_response.json().get('result', {})
+                        forward = ticker.get('mark_price')
+                        if forward and forward > 0:
+                            return {'forward': forward, 'source': 'future', 'instrument': best['instrument_name']}
+
+        # 2. Fallback: synthetic forward F = C - P + K (put-call parity)
+        if strike and strike > 0:
+            inst_resp = requests.get(
+                f'{DERIBIT_API}/get_instruments',
+                params={'currency': currency, 'kind': 'option', 'expired': 'false'},
+                timeout=30
+            )
+            if inst_resp.ok:
+                options = inst_resp.json().get('result', [])
+                active = [i for i in options if i.get('is_active') and i.get('strike')]
+                # Options with strike within 20% of target
+                nearby = [i for i in active if abs(i['strike'] - strike) / max(strike, 1e-9) < 0.2]
+                # Unique strikes, sorted by distance to target
+                unique_strikes = sorted(set(i['strike'] for i in nearby), key=lambda s: abs(s - strike))
+
+                for k in unique_strikes[:5]:
+                    call_inst = next((i for i in nearby if i['strike'] == k and i['option_type'] == 'call'), None)
+                    put_inst = next((i for i in nearby if i['strike'] == k and i['option_type'] == 'put'), None)
+                    if not call_inst or not put_inst:
+                        continue
+                    if abs(call_inst['expiration_timestamp'] - target_ts) > 14 * 24 * 60 * 60 * 1000:
+                        continue
+
+                    c_resp = requests.get(f'{DERIBIT_API}/ticker', params={'instrument_name': call_inst['instrument_name']}, timeout=30)
+                    p_resp = requests.get(f'{DERIBIT_API}/ticker', params={'instrument_name': put_inst['instrument_name']}, timeout=30)
+                    if not c_resp.ok or not p_resp.ok:
+                        continue
+
+                    c_ticker = c_resp.json().get('result', {})
+                    p_ticker = p_resp.json().get('result', {})
+                    c_price = c_ticker.get('mark_price') or c_ticker.get('last_price')
+                    p_price = p_ticker.get('mark_price') or p_ticker.get('last_price')
+                    if c_price is not None and p_price is not None:
+                        forward = c_price - p_price + k
+                        if forward > 0:
+                            return {'forward': forward, 'source': 'synthetic', 'strike_used': k}
+    except Exception as e:
+        print(f'Error fetching Deribit forward for {symbol}: {e}')
+
+    return None
+
+
 def fetch_deribit_data(symbol: str) -> Optional[Dict]:
     """
     Fetch options data from Deribit for BTC or ETH

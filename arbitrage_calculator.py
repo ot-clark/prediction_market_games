@@ -2,26 +2,28 @@
 Crypto Volatility Opportunity Calculator
 
 Calculates crypto volatility trading opportunities by comparing Polymarket crypto price target markets
-against model probabilities (z-score and Deribit options data).
+against model probabilities from Deribit options data (Black-76).
 
 This module focuses exclusively on crypto volatility markets - markets that bet on whether
-a crypto will reach a certain price target by a certain date.
+a crypto will reach a certain price target by a certain date. Only BTC and ETH are supported
+(derivatives of Deribit options).
 """
 
-import math
 from typing import List, Dict, Optional
 from datetime import datetime
 from data_fetchers import (
     fetch_polymarket_crypto_markets,
     fetch_crypto_prices,
     fetch_deribit_data,
+    fetch_deribit_forward_price,
 )
 from crypto_math import (
-    calculate_z_score_probability,
-    calculate_one_touch_probability,
-    calculate_call_delta,
+    calculate_black76_probability_itm,
+    calculate_black76_d1_d2,
     calculate_edge,
     time_to_expiry_years,
+    ProbabilityEstimate,
+    normal_cdf,
 )
 from config import DEFAULT_VOLATILITY, DERIBIT_SUPPORTED
 
@@ -31,9 +33,9 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
     
     This function:
     - Fetches crypto price target markets from Polymarket
-    - Calculates model probabilities using z-score and Deribit options data
+    - Calculates model probabilities using Deribit options data (Black-76)
     - Finds edges between Polymarket prices and model probabilities
-    - Returns opportunities sorted by edge magnitude
+    - Returns opportunities sorted by edge magnitude (BTC/ETH only)
     """
     # Step 1: Fetch Polymarket markets
     polymarket_markets = fetch_polymarket_crypto_markets(limit)
@@ -43,7 +45,7 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         return {
             'opportunities': [],
             'total_crypto_markets': 0,
-            'supported_cryptos': list(DEFAULT_VOLATILITY.keys()),
+            'supported_cryptos': list(DERIBIT_SUPPORTED),
             'last_updated': datetime.now(),
         }
     
@@ -70,6 +72,10 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
     opportunities = []
     
     for market in polymarket_markets:
+        # Only process BTC and ETH (Deribit-supported)
+        if market['crypto'] not in DERIBIT_SUPPORTED:
+            continue
+        
         price_data = prices.get(market['crypto'])
         if not price_data:
             continue
@@ -78,8 +84,9 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         if not current_price or current_price <= 0:
             continue
         
-        # Get volatility data
-        volatility = get_volatility_data(market['crypto'], deribit_data)
+        deribit = deribit_data.get(market['crypto'])
+        if not deribit:
+            continue
         
         # Calculate time to expiry
         expiry_date = market['expiry_date']
@@ -91,94 +98,72 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         if time_years <= 0:
             continue
         
-        # Calculate z-score probability
         target_price = market['target_price']
         direction = market['direction']
         bet_type = market['bet_type']
         
-        if bet_type == 'one-touch':
-            zscore_prob = calculate_one_touch_probability(
-                current_price,
-                target_price,
-                volatility['volatility'],
-                time_years
-            )
-        else:
-            zscore_prob = calculate_z_score_probability(
-                current_price,
-                target_price,
-                volatility['volatility'],
-                time_years
-            )
-            # For "below" direction, flip the probability
-            if direction == 'below':
-                zscore_prob.probability = 1 - zscore_prob.probability
-        
-        # Calculate Deribit-based probability (if available)
+        # Calculate Deribit-based probability (Black-76 model with N(d2))
+        # Uses forward price F (from Deribit future or synthetic F=C-P+K), not spot
         deribit_prob = None
-        deribit = deribit_data.get(market['crypto'])
+        iv_data = find_closest_strike_iv(deribit, target_price, expiry_date)
+        if iv_data and iv_data['iv'] > 0:
+            strike_iv = iv_data['iv']
+
+            # Get forward F: prefer Deribit future, else synthetic F=C-P+K, else fallback to spot
+            forward_data = fetch_deribit_forward_price(
+                market['crypto'], expiry_date, strike=target_price
+            )
+            if forward_data and forward_data.get('forward'):
+                forward = forward_data['forward']
+                f_source = forward_data.get('source', 'unknown')
+            else:
+                forward = current_price  # Fallback: F ≈ S for short-dated
+                f_source = 'spot_fallback'
+
+            # Black-76: d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
+            # P(expire ITM) = N(d2), not N(d1) - d2 gives risk-neutral prob of S_T > K
+            d1, d2 = calculate_black76_d1_d2(forward, target_price, strike_iv, time_years)
+
+            # Binary probability: N(d2) for "above", 1-N(d2) for "below"
+            binary_prob = calculate_black76_probability_itm(
+                forward, target_price, strike_iv, time_years, direction
+            )
+
+            if bet_type == 'one-touch':
+                probability = min(1.0, 2 * binary_prob)
+            else:
+                probability = binary_prob
+
+            if 0 < probability < 1:
+                deribit_prob = ProbabilityEstimate(
+                    method='deribit-black76',
+                    probability=probability,
+                    volatility_used=strike_iv,
+                    time_to_expiry=time_years,
+                    delta=normal_cdf(d2),  # N(d2) is the ITM probability
+                    math_breakdown={
+                        'formula': f'P({"touch" if bet_type == "one-touch" else "settle"}) = {"2 × " if bet_type == "one-touch" else ""}N(d2), Black-76',
+                        'steps': [
+                            f'Forward (F): ${forward:,.0f} (source: {f_source})',
+                            f'Target (K): ${target_price:,.0f}',
+                            f'Strike IV: {strike_iv * 100:.1f}%',
+                            f'Time (T): {time_years:.4f} years',
+                            f'd1 = [ln(F/K) + (σ²/2)T] / (σ√T) = {d1:.4f}',
+                            f'd2 = d1 - σ√T = {d2:.4f}',
+                            f'N(d2) = P(expire ITM) = {binary_prob:.4f}',
+                            f'Result: {probability * 100:.2f}%',
+                        ],
+                        'result': probability,
+                    }
+                )
         
-        if deribit and market['crypto'] in DERIBIT_SUPPORTED:
-            # Find the closest strike IV from Deribit options chain
-            iv_data = find_closest_strike_iv(deribit, target_price, expiry_date)
-            
-            if iv_data and iv_data['iv'] > 0:
-                strike_iv = iv_data['iv']
-                
-                # Calculate d1 for Black-Scholes delta
-                sqrt_t = (time_years ** 0.5)
-                d1 = (math.log(current_price / target_price) + (0.5 * strike_iv * strike_iv) * time_years) / (strike_iv * sqrt_t)
-                
-                # Call delta = Φ(d1) = P(settle above target)
-                call_delta = calculate_call_delta(current_price, target_price, strike_iv, time_years)
-                put_delta = 1 - call_delta
-                
-                is_target_above = target_price > current_price
-                
-                if bet_type == 'one-touch':
-                    # For one-touch: P(touch) ≈ 2 × delta
-                    base_delta = call_delta if is_target_above else put_delta
-                    probability = min(1.0, 2 * base_delta)
-                else:
-                    # Binary bet: P(settle above/below)
-                    use_call_delta = direction == 'above'
-                    probability = call_delta if use_call_delta else put_delta
-                
-                # Only create Deribit probability if probability is reasonable
-                if 0 < probability < 1:
-                    from crypto_math import ProbabilityEstimate
-                    deribit_prob = ProbabilityEstimate(
-                        method='deribit-delta',
-                        probability=probability,
-                        volatility_used=strike_iv,
-                        time_to_expiry=time_years,
-                        delta=call_delta if is_target_above else put_delta,
-                        math_breakdown={
-                            'formula': f'P({"touch" if bet_type == "one-touch" else "settle"}) = {"2 × " if bet_type == "one-touch" else ""}Δ',
-                            'steps': [
-                                f'Current price (S): ${current_price:,.0f}',
-                                f'Target price (K): ${target_price:,.0f}',
-                                f'Strike IV from Deribit: {strike_iv * 100:.1f}%',
-                                f'Time to expiry (T): {time_years:.4f} years ({int(time_years * 365)} days)',
-                                f'Call Delta = Φ(d1) = {call_delta:.4f}',
-                                f'Put Delta = 1 - Call Delta = {put_delta:.4f}',
-                                f'Result: {probability * 100:.2f}% probability',
-                            ],
-                            'result': probability,
-                        }
-                    )
+        # Only add opportunity if we have valid Deribit probability
+        if not deribit_prob:
+            continue
         
         # Calculate edge
         polymarket_prob = market['polymarket_price']
-        zscore_edge = calculate_edge(polymarket_prob, zscore_prob.probability)
-        
-        deribit_edge = None
-        if deribit_prob:
-            deribit_edge = calculate_edge(polymarket_prob, deribit_prob.probability)
-        
-        # Determine overall signal and confidence
-        # Prefer Deribit data when available
-        primary_edge = deribit_edge or zscore_edge
+        deribit_edge = calculate_edge(polymarket_prob, deribit_prob.probability)
         
         opportunity = {
             'market': market,
@@ -187,66 +172,29 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
                 'price': current_price,
                 'last_updated': datetime.now(),
             },
-            'volatility': volatility,
             'polymarket_prob': polymarket_prob,
-            'zscore_prob': {
-                'method': zscore_prob.method,
-                'probability': zscore_prob.probability,
-                'volatility_used': zscore_prob.volatility_used,
-                'time_to_expiry': zscore_prob.time_to_expiry,
-                'z_score': zscore_prob.z_score,
-            },
             'deribit_prob': {
                 'method': deribit_prob.method,
                 'probability': deribit_prob.probability,
                 'volatility_used': deribit_prob.volatility_used,
                 'time_to_expiry': deribit_prob.time_to_expiry,
                 'delta': deribit_prob.delta,
-            } if deribit_prob else None,
-            'edge_vs_zscore': zscore_edge['edge'],
-            'edge_vs_deribit': deribit_edge['edge'] if deribit_edge else None,
-            'signal': primary_edge['signal'],
-            'confidence': primary_edge['confidence'],
+            },
+            'edge_vs_deribit': deribit_edge['edge'],
+            'signal': deribit_edge['signal'],
+            'confidence': deribit_edge['confidence'],
         }
         
         opportunities.append(opportunity)
     
     # Sort by absolute edge (highest edge first)
-    opportunities.sort(
-        key=lambda o: abs(o['edge_vs_deribit'] or o['edge_vs_zscore']),
-        reverse=True
-    )
+    opportunities.sort(key=lambda o: abs(o['edge_vs_deribit']), reverse=True)
     
     return {
         'opportunities': opportunities,
         'total_crypto_markets': len(polymarket_markets),
         'supported_cryptos': crypto_symbols,
         'last_updated': datetime.now(),
-    }
-
-def get_volatility_data(symbol: str, deribit_data: Dict) -> Dict:
-    """
-    Get volatility data for a crypto
-    """
-    deribit = deribit_data.get(symbol)
-    
-    if deribit and deribit.get('atm_iv', 0) > 0:
-        return {
-            'symbol': symbol,
-            'deribit_iv': deribit['atm_iv'],
-            'deribit_iv_source': 'ATM IV from Deribit',
-            'default_vol': DEFAULT_VOLATILITY.get(symbol, DEFAULT_VOLATILITY['DEFAULT']),
-            'source': 'deribit',
-            'volatility': deribit['atm_iv'],
-        }
-    
-    # Fall back to default volatility
-    default_vol = DEFAULT_VOLATILITY.get(symbol, DEFAULT_VOLATILITY['DEFAULT'])
-    return {
-        'symbol': symbol,
-        'default_vol': default_vol,
-        'source': 'default',
-        'volatility': default_vol,
     }
 
 def find_closest_strike_iv(deribit: Dict, target_strike: float, target_expiry) -> Optional[Dict]:
