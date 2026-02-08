@@ -2,7 +2,7 @@
 Crypto Volatility Opportunity Calculator
 
 Calculates crypto volatility trading opportunities by comparing Polymarket crypto price target markets
-against model probabilities from Deribit options data (Black-76).
+against model probabilities from Deribit options (Breeden-Litzenberger + Black-76).
 
 This module focuses exclusively on crypto volatility markets - markets that bet on whether
 a crypto will reach a certain price target by a certain date. Only BTC and ETH are supported
@@ -16,15 +16,18 @@ from data_fetchers import (
     fetch_crypto_prices,
     fetch_deribit_data,
     fetch_deribit_forward_price,
-    fetch_iv_for_market,
+    fetch_iv_smile_for_breeden,
 )
 from crypto_math import (
-    calculate_black76_probability_itm,
-    calculate_black76_d1_d2,
     calculate_edge,
     time_to_expiry_years,
     ProbabilityEstimate,
-    normal_cdf,
+)
+from breeden_litzenberger import (
+    interpolate_iv_variance_based,
+    compute_expire_above_probability,
+    compute_expire_probability_gbm,
+    get_strike_spacing,
 )
 from config import DEFAULT_VOLATILITY, DERIBIT_SUPPORTED
 
@@ -34,7 +37,7 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
     
     This function:
     - Fetches crypto price target markets from Polymarket
-    - Calculates model probabilities using Deribit options data (Black-76)
+    - Calculates model probabilities using Deribit options (Breeden-Litzenberger)
     - Finds edges between Polymarket prices and model probabilities
     - Returns opportunities sorted by edge magnitude (BTC/ETH only)
     """
@@ -102,23 +105,10 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
         target_price = market['target_price']
         direction = market['direction']
         bet_type = market['bet_type']
-        
-        # Calculate Deribit-based probability (Black-76 model with N(d2))
-        # Uses forward price F (from Deribit future or synthetic F=C-P+K), not spot
-        # IV from PUT for 'below' (dip), CALL for 'above'; strike + expiry matched to market
         deribit_prob = None
-        iv_data = fetch_iv_for_market(
-            market['crypto'], target_price, expiry_date, direction, deribit
-        )
-        if iv_data and iv_data.get('iv', 0) > 0:
-            strike_iv = iv_data['iv']
-            iv_source = f"{iv_data.get('option_type', 'option').upper()} {iv_data.get('instrument_name', '')}"
-        else:
-            # Fallback: ATM IV from deribit
-            strike_iv = deribit.get('atm_iv') or DEFAULT_VOLATILITY.get(market['crypto'], 0.55)
-            iv_source = 'ATM fallback'
 
-        # Get forward F: prefer Deribit future, else synthetic F=C-P+K, else fallback to spot
+        # Get spot and forward (futures) for Breeden-Litzenberger
+        spot = deribit.get('underlying_price') or current_price
         forward_data = fetch_deribit_forward_price(
             market['crypto'], expiry_date, strike=target_price
         )
@@ -126,64 +116,82 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
             forward = forward_data['forward']
             f_source = forward_data.get('source', 'unknown')
         else:
-            forward = current_price  # Fallback: F ≈ S for short-dated
+            forward = spot
             f_source = 'spot_fallback'
 
-        # Black-76: d1 = [ln(F/K) + (σ²/2)T] / (σ√T), d2 = d1 - σ√T
-        # Use N(d2) = Φ(d2) for probability (NOT d2 - d2 is in std-dev units)
-        d1, d2 = calculate_black76_d1_d2(forward, target_price, strike_iv, time_years)
-        n_d2 = normal_cdf(d2)  # N(d2) = Φ(d2) = risk-neutral P(S_T > K)
+        # Use calls when K >= F (OTM call), puts when K < F (OTM put)
+        use_calls = target_price >= forward
+        option_type = 'call' if use_calls else 'put'
 
-        # Binary probability: N(d2) for "above", 1-N(d2) for "below"
-        binary_prob = calculate_black76_probability_itm(
-            forward, target_price, strike_iv, time_years, direction
+        # Fetch IV smile for Breeden-Litzenberger
+        smile_data = fetch_iv_smile_for_breeden(
+            market['crypto'], target_price, expiry_date, option_type, deribit
+        )
+        delta_K = get_strike_spacing(target_price, market['crypto'])
+        if not smile_data or len(smile_data[0]) < 3:
+            # Fallback: flat IV from ATM
+            strike_iv = deribit.get('atm_iv') or DEFAULT_VOLATILITY.get(market['crypto'], 0.55)
+            strike_grid = [target_price - delta_K, target_price, target_price + delta_K]
+            iv_grid = [strike_iv, strike_iv, strike_iv]
+            smile_data = (strike_grid, iv_grid)
+
+        strike_grid, iv_grid = smile_data
+        iv_minus, iv_at_K, iv_plus = interpolate_iv_variance_based(
+            target_price, strike_grid, iv_grid, time_years, delta_K
         )
 
-        if bet_type == 'one-touch':
-            probability = min(1.0, 2 * binary_prob)
-        else:
-            probability = binary_prob
+        if iv_minus <= 0 or iv_plus <= 0:
+            continue
 
-        # Time extrapolation: we always use T = market expiry (not option expiry)
-        # When option expires before market, P(touch by T_market) > P(touch by T_option)
-        option_expiry_ts = iv_data.get('expiry_timestamp') if iv_data else None
-        option_expires_before_market = False
-        if option_expiry_ts and expiry_date:
-            from datetime import timezone
-            if hasattr(expiry_date, 'timestamp'):
-                market_ts = int(expiry_date.timestamp() * 1000)
-            else:
-                from dateutil.parser import parse
-                exp = parse(expiry_date) if isinstance(expiry_date, str) else expiry_date
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                market_ts = int(exp.timestamp() * 1000)
-            if option_expiry_ts < market_ts:
-                option_expires_before_market = True
+        # Breeden-Litzenberger for European expire-above probability
+        prob_expire_above = compute_expire_above_probability(
+            spot=spot,
+            futures=forward,
+            strike_K=target_price,
+            T=time_years,
+            iv_at_K_minus=iv_minus,
+            iv_at_K_plus=iv_plus,
+            delta_K=delta_K,
+            use_calls=use_calls,
+        )
+
+        # P(S_T > K) for above, P(S_T < K) = 1 - P(S_T > K) for below
+        if direction == 'below':
+            prob_settle = 1.0 - prob_expire_above
+        else:
+            prob_settle = prob_expire_above
+
+        if bet_type == 'one-touch':
+            touch_dir = 'above' if direction == 'above' else 'below'
+            p_expiry_gbm = compute_expire_probability_gbm(
+                spot=spot,
+                futures=forward,
+                strike_K=target_price,
+                T=time_years,
+                sigma=iv_at_K,
+                direction=touch_dir,
+            )
+            probability = min(1.0, 2.0 * p_expiry_gbm)
+        else:
+            probability = prob_settle
 
         if 0 < probability < 1:
-            extrap_note = ''
-            if option_expires_before_market:
-                extrap_note = '\n  (Option expires before market; using market T → higher P(touch) with extra time)'
             deribit_prob = ProbabilityEstimate(
-                method='deribit-black76',
+                method='deribit-breeden-litzenberger',
                 probability=probability,
-                volatility_used=strike_iv,
+                volatility_used=iv_at_K,
                 time_to_expiry=time_years,
-                delta=binary_prob,  # P(ITM) for our direction
+                delta=prob_settle,
                 math_breakdown={
-                    'formula': f'P = {"2 × " if bet_type == "one-touch" else ""}N(d2), where N(d2)=Φ(d2) is the CDF (probability), not d2',
+                    'formula': f'P = {"2 × P_expiry_GBM (one-touch)" if bet_type == "one-touch" else "Breeden-Litzenberger expire-above"}',
                     'steps': [
-                        f'Forward (F): ${forward:,.0f} (source: {f_source})',
-                        f'Target (K): ${target_price:,.0f}',
-                        f'Strike IV: {strike_iv * 100:.1f}% (source: {iv_source})',
-                        f'Time (T): {time_years:.4f} years (market expiry)',
-                        f'd1 = [ln(F/K) + (σ²/2)T] / (σ√T) = {d1:.4f}',
-                        f'd2 = d1 - σ√T = {d2:.4f} (std-dev units)',
-                        f'N(d2) = Φ(d2) = {n_d2:.4f} (P(S_T > K) for call)',
-                        f'P(settle) = {"1 - " if direction == "below" else ""}N(d2) = {binary_prob:.4f}',
-                        (f'P(touch) ≈ 2 × P(settle) = {probability:.4f}' if bet_type == 'one-touch' else f'P(settle) = {probability:.4f}'),
-                        f'Result: {probability * 100:.2f}%' + extrap_note,
+                        f'Spot (S): ${spot:,.0f}, Forward (F): ${forward:,.0f} (source: {f_source})',
+                        f'Target (K): ${target_price:,.0f}, T: {time_years:.4f} years',
+                        f'r = ln(F/S)/T from futures-spot',
+                        f'IV smile: interpolated at K±{delta_K:.0f} (variance-based)',
+                        f'P_BL (expire {"above" if direction == "above" else "below"} K) = {prob_settle:.4f}',
+                        (f'P(touch) = 2 × P_expiry_GBM = {probability:.4f}' if bet_type == 'one-touch' else f'P(settle) = {probability:.4f}'),
+                        f'Result: {probability * 100:.2f}%',
                     ],
                     'result': probability,
                 }

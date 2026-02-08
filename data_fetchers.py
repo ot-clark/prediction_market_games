@@ -3,7 +3,7 @@ Data fetching functions for Polymarket, CoinGecko, and Deribit APIs
 """
 
 import requests
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from config import (
     GAMMA_API, CLOB_API, DERIBIT_API, COINGECKO_API,
@@ -505,6 +505,106 @@ def fetch_iv_for_market(
         }
     except Exception:
         return None
+
+
+def fetch_iv_smile_for_breeden(
+    symbol: str,
+    target_strike: float,
+    target_expiry,
+    option_type: str,
+    deribit_data: Optional[Dict] = None,
+    num_strikes: int = 7,
+) -> Optional[Tuple[List[float], List[float]]]:
+    """
+    Fetch IV smile (strikes, ivs) for Breeden-Litzenberger.
+    Picks expiry closest to target, returns strikes around target_strike.
+    Returns (strike_grid, iv_grid) sorted by strike, or None.
+    """
+    from datetime import timezone
+
+    if symbol.upper() not in DERIBIT_SUPPORTED:
+        return None
+
+    instruments = []
+    if deribit_data and deribit_data.get('instruments'):
+        instruments = deribit_data['instruments']
+    else:
+        try:
+            resp = requests.get(
+                f'{DERIBIT_API}/get_instruments',
+                params={'currency': symbol.upper(), 'kind': 'option', 'expired': 'false'},
+                timeout=30
+            )
+            if resp.ok:
+                instruments = [i for i in resp.json().get('result', []) if i.get('is_active')]
+        except Exception:
+            pass
+
+    if not instruments:
+        return None
+
+    target_ts = int(target_expiry.timestamp() * 1000) if hasattr(target_expiry, 'timestamp') else 0
+    if target_ts == 0:
+        from dateutil.parser import parse
+        exp = parse(target_expiry) if isinstance(target_expiry, str) else target_expiry
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        target_ts = int(exp.timestamp() * 1000)
+
+    strike_band = 0.25
+    window_ms = 14 * 24 * 60 * 60 * 1000
+    candidates = [
+        i for i in instruments
+        if i.get('option_type') == option_type
+        and i.get('strike')
+        and abs(i['strike'] - target_strike) / max(target_strike, 1) <= strike_band
+        and abs(i.get('expiration_timestamp', 0) - target_ts) < window_ms
+    ]
+
+    if not candidates:
+        return None
+
+    # Pick expiry closest to target
+    expiries = sorted(set(i['expiration_timestamp'] for i in candidates))
+    best_exp_ts = min(expiries, key=lambda e: abs(e - target_ts))
+    candidates = [i for i in candidates if i['expiration_timestamp'] == best_exp_ts]
+
+    # Strikes around target, sorted by distance
+    unique_strikes = sorted(
+        set(i['strike'] for i in candidates),
+        key=lambda s: abs(s - target_strike)
+    )[:num_strikes]
+
+    strike_grid = []
+    iv_grid = []
+    for strike in unique_strikes:
+        inst = next((i for i in candidates if i['strike'] == strike), None)
+        if not inst:
+            continue
+        try:
+            ticker_resp = requests.get(
+                f'{DERIBIT_API}/ticker',
+                params={'instrument_name': inst['instrument_name']},
+                timeout=30
+            )
+            if not ticker_resp.ok:
+                continue
+            ticker = ticker_resp.json().get('result', {})
+            iv_pct = ticker.get('mark_iv') or ticker.get('iv', 0)
+            iv = (iv_pct or 0) / 100
+            if iv > 0:
+                strike_grid.append(strike)
+                iv_grid.append(iv)
+        except Exception:
+            continue
+
+    if len(strike_grid) < 3:
+        return None
+    # Sort by strike for interpolation
+    paired = sorted(zip(strike_grid, iv_grid))
+    strike_grid = [p[0] for p in paired]
+    iv_grid = [p[1] for p in paired]
+    return (strike_grid, iv_grid)
 
 
 def get_order_book(token_id: str) -> Optional[Dict]:

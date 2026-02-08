@@ -13,6 +13,9 @@ ENV/
 .env
 .env.local
 
+# SSH keys
+*.pem
+
 # Bot state files
 data/*.json
 data/*.csv

@@ -23,7 +23,7 @@ from arbitrage_calculator import calculate_arbitrage_opportunities
 CONFIG = {
     'starting_balance': 1000,
     'min_edge_to_enter': 0.05,          # 5% edge to enter
-    'max_edge_to_exit': 0.05,           # Exit when edge < 5%
+    'max_edge_to_exit': 0.03,           # Exit when edge < 3%
     'base_position_size': 25,            # $25 base
     'edge_multiplier': 500,              # +$50 per 10% additional edge
     'max_position_size': 100,            # Max $100 per position
