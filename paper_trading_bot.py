@@ -30,7 +30,7 @@ CONFIG = {
     'max_total_exposure': 500,           # Max $500 total exposure
     'poll_interval_seconds': 60,        # Check every 1 minute
     'max_positions_per_market': 1,
-    'min_time_to_expiry_days': 1,        # Min 1 day to expiry
+    'min_time_to_expiry_hours': 4,       # Min 4 hours to expiry
 }
 
 STATE_FILE = Path('data/bot_state.json')
@@ -230,9 +230,10 @@ def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
         expiry_date = parse(expiry_date)
     if expiry_date.tzinfo is None:
         expiry_date = expiry_date.replace(tzinfo=timezone.utc)
-    days_to_expiry = (expiry_date - datetime.now(timezone.utc)).days
-    if days_to_expiry < config['min_time_to_expiry_days']:
-        return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Only {days_to_expiry} days to expiry'}
+    hours_to_expiry = (expiry_date - datetime.now(timezone.utc)).total_seconds() / 3600
+    min_hours = config.get('min_time_to_expiry_hours', 4)
+    if hours_to_expiry < min_hours:
+        return {'should_enter': False, 'side': 'long', 'edge': edge, 'reason': f'Only {hours_to_expiry:.1f}h to expiry (min {min_hours}h)'}
     
     # Check if already have position in this market
     existing_position = next((p for p in state['open_positions'] if p['market_id'] == opp['market']['id']), None)
@@ -570,7 +571,7 @@ def start_bot():
     print(f'   Max Position Size: ${CONFIG["max_position_size"]:.2f}')
     print(f'   Max Total Exposure: ${CONFIG["max_total_exposure"]:.2f}')
     print(f'   Poll Interval: {CONFIG["poll_interval_seconds"]} seconds')
-    print(f'   Min Time to Expiry: {CONFIG["min_time_to_expiry_days"]} days')
+    print(f'   Min Time to Expiry: {CONFIG["min_time_to_expiry_hours"]} hours')
     print('\n⚠️  MODE: Forward Testing (No Real Orders)')
     print('='*60)
     
