@@ -24,8 +24,11 @@ from crypto_math import (
     ProbabilityEstimate,
 )
 from breeden_litzenberger import (
+    get_spline_interpolator,
     interpolate_iv_variance_based,
+    interpolate_iv_cubic_spline,
     compute_expire_above_probability,
+    compute_expire_above_probability_spline,
     compute_expire_probability_gbm,
     get_strike_spacing,
 )
@@ -136,24 +139,39 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
             smile_data = (strike_grid, iv_grid)
 
         strike_grid, iv_grid = smile_data
-        iv_minus, iv_at_K, iv_plus = interpolate_iv_variance_based(
-            target_price, strike_grid, iv_grid, time_years, delta_K
-        )
-
-        if iv_minus <= 0 or iv_plus <= 0:
-            continue
-
-        # Breeden-Litzenberger for European expire-above probability
-        prob_expire_above = compute_expire_above_probability(
-            spot=spot,
-            futures=forward,
-            strike_K=target_price,
-            T=time_years,
-            iv_at_K_minus=iv_minus,
-            iv_at_K_plus=iv_plus,
-            delta_K=delta_K,
-            use_calls=use_calls,
-        )
+        spline = get_spline_interpolator(strike_grid, iv_grid, time_years)
+        if spline is not None:
+            iv_minus, iv_at_K, iv_plus = interpolate_iv_cubic_spline(
+                target_price, spline, time_years, delta_K
+            )
+            if iv_minus <= 0 or iv_plus <= 0:
+                continue
+            prob_expire_above = compute_expire_above_probability_spline(
+                spot=spot,
+                futures=forward,
+                strike_K=target_price,
+                T=time_years,
+                spline=spline,
+                delta_K=delta_K,
+            )
+            smile_method = "cubic spline (σ²T)"
+        else:
+            iv_minus, iv_at_K, iv_plus = interpolate_iv_variance_based(
+                target_price, strike_grid, iv_grid, time_years, delta_K
+            )
+            if iv_minus <= 0 or iv_plus <= 0:
+                continue
+            prob_expire_above = compute_expire_above_probability(
+                spot=spot,
+                futures=forward,
+                strike_K=target_price,
+                T=time_years,
+                iv_at_K_minus=iv_minus,
+                iv_at_K_plus=iv_plus,
+                delta_K=delta_K,
+                use_calls=use_calls,
+            )
+            smile_method = "variance-based linear"
 
         # P(S_T > K) for above, P(S_T < K) = 1 - P(S_T > K) for below
         if direction == 'below':
@@ -188,7 +206,7 @@ def calculate_arbitrage_opportunities(limit: int = 100) -> Dict:
                         f'Spot (S): ${spot:,.0f}, Forward (F): ${forward:,.0f} (source: {f_source})',
                         f'Target (K): ${target_price:,.0f}, T: {time_years:.4f} years',
                         f'r = ln(F/S)/T from futures-spot',
-                        f'IV smile: interpolated at K±{delta_K:.0f} (variance-based)',
+                        f'IV smile: {smile_method} at K±{delta_K:.0f}',
                         f'P_BL (expire {"above" if direction == "above" else "below"} K) = {prob_settle:.4f}',
                         (f'P(touch) = 2 × P_expiry_GBM = {probability:.4f}' if bet_type == 'one-touch' else f'P(settle) = {probability:.4f}'),
                         f'Result: {probability * 100:.2f}%',

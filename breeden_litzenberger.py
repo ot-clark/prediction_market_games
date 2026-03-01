@@ -4,14 +4,17 @@ Breeden-Litzenberger probability extraction and one-touch formulas.
 Implements risk-neutral probabilities from Deribit options using:
 - Breeden-Litzenberger for European (expire-above) probabilities
 - Proper one-touch formula for path-dependent contracts
-- Variance-based IV interpolation for volatility smile
+- Variance-based IV interpolation (linear or cubic spline in total variance)
 
 Reference: Document on fundamental formulas (triple-checked).
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
+
+import numpy as np
 from scipy.stats import norm
+from scipy.interpolate import CubicSpline
 
 
 def black76_call(F: float, K: float, T: float, r: float, sigma: float) -> float:
@@ -41,6 +44,91 @@ def extract_risk_free_rate(spot: float, futures: float, T: float) -> float:
     if futures <= 0:
         return 0.0
     return math.log(futures / spot) / T
+
+
+def get_spline_interpolator(
+    strike_grid: List[float],
+    iv_grid: List[float],
+    T: float,
+) -> Optional[Any]:
+    """
+    Fit a cubic spline to total variance (σ²T). Returns None if too few points.
+    Total variance is smoother and more stable for splining than raw IV.
+    Natural BC (second derivative zero at boundaries) dampens wing extrapolation.
+    """
+    if not strike_grid or not iv_grid or len(strike_grid) != len(iv_grid):
+        return None
+    if T <= 0 or len(strike_grid) < 2:
+        return None
+    x = np.array(strike_grid, dtype=float)
+    y = np.array([(iv ** 2) * T for iv in iv_grid], dtype=float)
+    idx = np.argsort(x)
+    x, y = x[idx], y[idx]
+    return CubicSpline(x, y, bc_type="natural")
+
+
+def interpolate_iv_cubic_spline(
+    strike_K: float,
+    spline: Any,
+    T: float,
+    delta_K: float,
+) -> Tuple[float, float, float]:
+    """
+    Return (iv_minus, iv_K, iv_plus) using the fitted spline.
+    Evaluation strikes are clamped to the spline domain to avoid extrapolation.
+    """
+    if T <= 0:
+        return 0.0, 0.0, 0.0
+    k_min = float(spline.x.min())
+    k_max = float(spline.x.max())
+    ks = np.array(
+        [strike_K - delta_K, strike_K, strike_K + delta_K],
+        dtype=float,
+    )
+    ks_clipped = np.clip(ks, k_min, k_max)
+    total_variances = spline(ks_clipped)
+    ivs = [
+        math.sqrt(max(0.0, float(v)) / T) for v in total_variances
+    ]
+    return (ivs[0], ivs[1], ivs[2])
+
+
+def compute_expire_above_probability_spline(
+    spot: float,
+    futures: float,
+    strike_K: float,
+    T: float,
+    spline: Any,
+    delta_K: float,
+) -> float:
+    """
+    P(S_T > K) using Breeden-Litzenberger with cubic spline smile.
+    delta_K should be strike spacing (e.g. from get_strike_spacing) for a stable
+    numerical derivative, not a tiny value.
+    """
+    r = extract_risk_free_rate(spot, futures, T)
+    iv_m, _, iv_p = interpolate_iv_cubic_spline(strike_K, spline, T, delta_K)
+    if iv_m <= 0 and iv_p <= 0:
+        return 0.0
+    if strike_K >= futures:
+        C_plus = black76_call(
+            F=futures, K=strike_K + delta_K, T=T, r=r, sigma=iv_p
+        )
+        C_minus = black76_call(
+            F=futures, K=strike_K - delta_K, T=T, r=r, sigma=iv_m
+        )
+        digital_pv = -(C_plus - C_minus) / (2 * delta_K)
+    else:
+        P_plus = black76_put(
+            F=futures, K=strike_K + delta_K, T=T, r=r, sigma=iv_p
+        )
+        P_minus = black76_put(
+            F=futures, K=strike_K - delta_K, T=T, r=r, sigma=iv_m
+        )
+        digital_put_pv = (P_plus - P_minus) / (2 * delta_K)
+        digital_pv = math.exp(-r * T) - digital_put_pv
+    prob = digital_pv * math.exp(r * T)
+    return max(0.0, min(1.0, prob))
 
 
 def interpolate_iv_variance_based(

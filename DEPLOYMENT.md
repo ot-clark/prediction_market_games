@@ -455,7 +455,38 @@ screen -ls
 
 ## Monitoring and Maintenance
 
-### Check bot state
+### Accessing `data/bot_state.json` in the cloud
+
+The bot saves state to `data/bot_state.json` on the server. To see the full log of performance (balance, positions, P&L, win rate, `daily_returns`, `closed_positions`, etc.):
+
+**Option 1 – SSH in, then run commands on the server**
+
+Use the **full path to your .pem key** (e.g. `.../polypair.pem`). The `cd` and `cat` run **after** you are logged in to the server:
+
+```bash
+# Use your real key path (e.g. /Users/owenclark/Projects/prediction_market_arb/polypair.pem)
+ssh -i /path/to/your-key.pem ubuntu@YOUR_INSTANCE_IP
+# After you see the server prompt, run:
+cd ~/prediction_market_games
+cat data/bot_state.json | python3 -m json.tool
+```
+
+**Option 2 – One command from your laptop (key + IP required)**
+
+```bash
+ssh -i /path/to/your-key.pem ubuntu@YOUR_INSTANCE_IP "cd ~/prediction_market_games && cat data/bot_state.json | python3 -m json.tool"
+```
+
+**Option 3 – Download the file to inspect locally**
+
+```bash
+scp -i /path/to/your-key.pem ubuntu@YOUR_INSTANCE_IP:~/prediction_market_games/data/bot_state.json ./bot_state.json
+# Then: cat bot_state.json | python3 -m json.tool
+```
+
+All paths above assume the repo on the server is in `~/prediction_market_games` (see top of this doc). The file includes `daily_returns`, `closed_positions`, `trades`, and full portfolio state.
+
+### Check bot state (on server)
 
 ```bash
 cat ~/prediction_market_games/data/bot_state.json | python3 -m json.tool

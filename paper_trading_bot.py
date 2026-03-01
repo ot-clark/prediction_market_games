@@ -142,9 +142,17 @@ def record_daily_return(state: Dict, current_equity: float):
     if current_date == last_date:
         return
 
-    # New day: compute yesterday's return and log it
+    # New day: compute yesterday's return and log it only when days are consecutive
+    # (if the bot was down for a day, (current - prev) would be a multi-day return and would skew Sharpe)
+    try:
+        from datetime import datetime as _dt
+        last_d = _dt.strptime(last_date, '%Y-%m-%d')
+        curr_d = _dt.strptime(current_date, '%Y-%m-%d')
+        days_gap = (curr_d - last_d).days
+    except (ValueError, TypeError):
+        days_gap = 1
     prev_equity = state['daily_equity_log'].get(last_date)
-    if prev_equity is not None and prev_equity > 0:
+    if prev_equity is not None and prev_equity > 0 and days_gap == 1:
         daily_return = (current_equity - prev_equity) / prev_equity
         state['daily_returns'].append({
             'date': last_date,
@@ -165,6 +173,9 @@ def record_daily_return(state: Dict, current_equity: float):
             print(f'Warning: Could not write daily returns log: {e}')
 
         print(f'\n📅 DAILY RETURN RECORDED: {last_date} → {daily_return * 100:+.2f}% (equity ${prev_equity:.2f} → ${current_equity:.2f})')
+    elif days_gap != 1 and prev_equity is not None:
+        # Skipped day(s): don't record a single "daily" return (it would be multi-day and skew Sharpe)
+        pass
 
     state['last_recorded_date'] = current_date
 
@@ -172,10 +183,18 @@ def calculate_sharpe_ratio(daily_returns: List[Dict], risk_free_rate: float = 0)
     """
     Annualized Sharpe ratio. Assumes 252 trading days.
     Returns None if fewer than 2 returns.
+    Uses only consecutive-day daily returns (sorted by date); skips non-numeric values.
     """
-    if not daily_returns or len(daily_returns) < 2:
+    if not daily_returns:
         return None
-    returns = [r['daily_return'] for r in daily_returns]
+    # Sort by date so the series is chronological (defensive for migrated/corrupted state)
+    sorted_returns = sorted(
+        (r for r in daily_returns if isinstance(r.get('daily_return'), (int, float))),
+        key=lambda x: x.get('date', ''),
+    )
+    if len(sorted_returns) < 2:
+        return None
+    returns = [r['daily_return'] for r in sorted_returns]
     mean_r = sum(returns) / len(returns)
     variance = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
     std_r = variance ** 0.5
@@ -514,7 +533,9 @@ def run_bot_cycle(state: Dict):
         total_return = ((current_equity - starting_balance) / starting_balance * 100) if starting_balance > 0 else 0
 
         # Sharpe ratio (annualized, from daily returns)
-        sharpe = calculate_sharpe_ratio(state.get('daily_returns', []))
+        daily_returns_list = state.get('daily_returns', [])
+        sharpe = calculate_sharpe_ratio(daily_returns_list)
+        n_days = len([r for r in daily_returns_list if isinstance(r.get('daily_return'), (int, float))])
 
         # Log summary
         print(f'\n{"="*60}')
@@ -529,7 +550,8 @@ def run_bot_cycle(state: Dict):
         print(f'📊 Total P&L: ${total_pnl:.2f}')
         print(f'📉 Total Return: {total_return:+.2f}%')
         if sharpe is not None:
-            print(f'📈 Sharpe Ratio (ann.): {sharpe:.2f}')
+            days_label = f', {n_days} days' if n_days < 90 else ''
+            print(f'📈 Sharpe Ratio (ann.{days_label}): {sharpe:.2f}')
         else:
             print(f'📈 Sharpe Ratio (ann.): N/A (need 2+ days of returns)')
         print(f'🎯 Win Rate: {state["win_rate"] * 100:.1f}% ({state["winning_trades"]}W / {state["losing_trades"]}L)')
@@ -619,7 +641,9 @@ def start_bot():
         starting_balance = state.get('starting_balance', CONFIG['starting_balance'])
         current_equity = get_mark_to_market_equity(state)
         total_return = ((current_equity - starting_balance) / starting_balance * 100) if starting_balance > 0 else 0
-        sharpe = calculate_sharpe_ratio(state.get('daily_returns', []))
+        daily_returns_list = state.get('daily_returns', [])
+        sharpe = calculate_sharpe_ratio(daily_returns_list)
+        n_days = len([r for r in daily_returns_list if isinstance(r.get('daily_return'), (int, float))])
 
         print(f'\n📊 FINAL SUMMARY:')
         print(f'   Starting Balance: ${starting_balance:.2f}')
@@ -627,7 +651,8 @@ def start_bot():
         print(f'   Total Return: {total_return:+.2f}%')
         print(f'   Realized P&L: ${state["total_pnl"]:.2f}')
         if sharpe is not None:
-            print(f'   Sharpe Ratio (ann.): {sharpe:.2f}')
+            days_label = f', {n_days} days' if n_days < 90 else ''
+            print(f'   Sharpe Ratio (ann.{days_label}): {sharpe:.2f}')
         print(f'   Win Rate: {state["win_rate"] * 100:.1f}%')
         print(f'   Total Trades: {state["total_trades"]}')
         print(f'   Daily Returns: {len(state.get("daily_returns", []))} days')
