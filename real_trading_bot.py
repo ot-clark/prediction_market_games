@@ -215,8 +215,10 @@ def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
     if isinstance(expiry_date, str):
         from dateutil.parser import parse
         expiry_date = parse(expiry_date)
-    
-    days_to_expiry = (expiry_date - datetime.now()).days
+    if expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    days_to_expiry = (expiry_date - now_utc).days
     if days_to_expiry < config['min_time_to_expiry_days']:
         return {'should_enter': False, 'side': 'long', 'edge': edge, 'size': 0, 'reason': f'Only {days_to_expiry} days to expiry'}
     
