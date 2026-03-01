@@ -40,7 +40,7 @@ CONFIG = {
     'max_position_size': 10,            # Max $10 per position
     'poll_interval_seconds': 120,       # Check every 2 minutes
     'min_time_to_expiry_days': 1,       # At least 1 day to expiry
-    'dry_run': True,                    # Set False when order execution is live
+    'dry_run': False,                   # True = simulate only; False = attempt real orders (requires order execution implemented)
 }
 
 STATE_FILE = Path('data/real_bot_state.json')
