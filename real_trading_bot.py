@@ -21,9 +21,43 @@ from pathlib import Path
 from dotenv import load_dotenv
 from arbitrage_calculator import calculate_arbitrage_opportunities
 from data_fetchers import get_order_book
+from config import CLOB_API, POLYGON_CHAIN_ID
 
 # Load environment variables
 load_dotenv()
+
+# Lazy-initialized Polymarket CLOB client (for real order execution)
+_clob_client = None
+
+
+def _get_clob_client():
+    """Build and cache ClobClient from env. Returns None if POLYMARKET_PRIVATE_KEY not set."""
+    global _clob_client
+    if _clob_client is not None:
+        return _clob_client
+    key = os.environ.get('POLYMARKET_PRIVATE_KEY', '').strip()
+    if not key or key.startswith('0x') and len(key) < 66:
+        return None
+    try:
+        from py_clob_client.client import ClobClient
+        host = CLOB_API
+        chain_id = int(os.environ.get('POLYGON_CHAIN_ID', POLYGON_CHAIN_ID))
+        signature_type = int(os.environ.get('POLYMARKET_SIGNATURE_TYPE', '0'))
+        funder = os.environ.get('POLYMARKET_FUNDER', '').strip() or None
+        client = ClobClient(
+            host,
+            key=key,
+            chain_id=chain_id,
+            signature_type=signature_type,
+            funder=funder if funder else None,
+        )
+        creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+        _clob_client = client
+        return _clob_client
+    except Exception as e:
+        print(f'  [ERROR] Failed to create CLOB client: {e}')
+        return None
 
 # ============================================================================
 # CONFIGURATION - $100 LIVE TEST
@@ -276,16 +310,25 @@ def should_exit_position(position: Dict, opportunities: List[Dict], config: Dict
     
     return {'should_exit': False, 'reason': 'Edge still favorable', 'current_edge': current_edge, 'current_price': current_price}
 
-def execute_order(opp: Dict, side: str, size: float, config: Dict) -> Dict:
+def _round_to_tick(price: float, tick_size: float) -> float:
+    """Round price to market tick size."""
+    if tick_size <= 0:
+        return round(price, 4)
+    n = max(0, -int(round(math.log10(tick_size))))
+    return round(round(price / tick_size) * tick_size, n)
+
+
+def execute_order(
+    opp: Dict,
+    side: str,
+    size: float,
+    config: Dict,
+    shares_to_sell: Optional[float] = None,
+) -> Dict:
     """
-    Execute an order on Polymarket
-    
-    NOTE: This is a placeholder. Full implementation requires:
-    - EIP-712 signing for Polymarket orders
-    - USDC approval on Polygon
-    - Proper error handling and order confirmation
-    
-    For now, this simulates the order execution.
+    Execute an order on Polymarket via py-clob-client (EIP-712).
+    - Entry: BUY token (size = dollars). side is 'long' or 'short' (which token).
+    - Exit: SELL token (shares_to_sell = shares to sell). size still passed but not used for SELL.
     """
     if config['dry_run']:
         print(f'  [DRY RUN] Would {side.upper()} ${size:.2f} on "{opp["market"]["question"][:40]}..."')
@@ -295,38 +338,84 @@ def execute_order(opp: Dict, side: str, size: float, config: Dict) -> Dict:
             'filled_price': opp['polymarket_prob'],
         }
     
-    # Get token IDs
     token_ids = opp['market'].get('token_ids', [])
     if not token_ids or len(token_ids) < 2:
         print(f'  [ERROR] No token IDs for market')
         return {'success': False}
     
     token_id = token_ids[0] if side == 'long' else token_ids[1]
-    
-    # Get order book
     book = get_order_book(token_id)
     if not book:
         print(f'  [ERROR] Could not get order book')
         return {'success': False}
     
-    price = book['best_ask']
-    shares = size / price
+    client = _get_clob_client()
+    if not client:
+        print(f'  [ERROR] No CLOB client (set POLYMARKET_PRIVATE_KEY in .env)')
+        return {'success': False, 'reason': 'No CLOB client'}
     
-    print(f'  [REAL] Would place order...')
-    print(f'    Token: {token_id[:20]}...')
-    print(f'    Side: BUY ({side})')
-    print(f'    Size: ${size:.2f} = {shares:.4f} shares @ {price * 100:.1f}%')
-    print(f'  [WARNING] Real order execution not implemented - requires EIP-712 signing')
+    try:
+        tick_size = float(client.get_tick_size(token_id) or 0.01)
+    except Exception:
+        tick_size = 0.01
+    try:
+        neg_risk = bool(client.get_neg_risk(token_id))
+    except Exception:
+        neg_risk = False
     
-    # TODO: Implement actual order placement using web3.py and EIP-712 signing
-    # This requires:
-    # 1. Initialize web3 with Polygon RPC
-    # 2. Create wallet from private key
-    # 3. Check/set USDC allowance
-    # 4. Sign EIP-712 order message
-    # 5. Post order to Polymarket CLOB API
+    options = {'tick_size': str(tick_size), 'neg_risk': neg_risk}
     
-    return {'success': False, 'reason': 'Order execution not implemented'}
+    is_sell = shares_to_sell is not None and shares_to_sell > 0
+    if is_sell:
+        price = _round_to_tick(book['best_bid'], tick_size)
+        order_side = 'SELL'
+        size_arg = float(shares_to_sell)
+        print(f'  [REAL] Placing SELL {size_arg:.4f} shares @ {price * 100:.1f}%...')
+    else:
+        price = _round_to_tick(book['best_ask'], tick_size)
+        order_side = 'BUY'
+        size_arg = float(size)
+        print(f'  [REAL] Placing BUY ${size_arg:.2f} @ {price * 100:.1f}%...')
+    
+    try:
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
+        side_enum = SELL if is_sell else BUY
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size_arg,
+            side=side_enum,
+        )
+        signed = client.create_order(order_args, options=options)
+        resp = client.post_order(signed, OrderType.GTC)
+    except Exception as e:
+        print(f'  [ERROR] Order failed: {e}')
+        return {'success': False, 'reason': str(e)}
+    
+    if not resp or not resp.get('success', False):
+        err = resp.get('errorMsg', resp.get('reason', 'Unknown error')) if isinstance(resp, dict) else str(resp)
+        print(f'  [ERROR] CLOB rejected order: {err}')
+        return {'success': False, 'reason': err}
+    
+    order_id = resp.get('orderID', resp.get('orderId', ''))
+    status = resp.get('status', '')
+    print(f'  [OK] Order placed: {order_id} status={status}')
+    filled_price = price
+    if is_sell:
+        usdc_received = size_arg * price
+        return {
+            'success': True,
+            'order_id': order_id,
+            'filled_price': filled_price,
+            'usdc_received': usdc_received,
+        }
+    return {
+        'success': True,
+        'order_id': order_id,
+        'filled_price': filled_price,
+        'token_id': token_id,
+    }
 
 def check_market_resolution(position: Dict) -> Dict:
     """Check if a market has been resolved"""
@@ -407,12 +496,16 @@ def run_bot_cycle(state: Dict):
                 print(f'  EXIT SIGNAL: "{position["market_question"][:40]}..."')
                 print(f'    Reason: {exit_check["reason"]}')
                 
-                # TODO: Execute sell order
+                opp_exit = next((o for o in opportunities if o['market']['id'] == position['market_id']), None)
+                if not opp_exit:
+                    print(f'  [WARNING] No opportunity data for position, skipping exit')
+                    continue
                 result = execute_order(
-                    next((o for o in opportunities if o['market']['id'] == position['market_id']), None),
+                    opp_exit,
                     position['side'],
                     position['size'],
-                    CONFIG
+                    CONFIG,
+                    shares_to_sell=position.get('shares'),
                 )
                 
                 if result.get('success'):

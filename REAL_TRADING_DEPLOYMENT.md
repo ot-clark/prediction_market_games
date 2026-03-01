@@ -133,7 +133,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/prediction_market_games
 Environment="PATH=/home/ubuntu/prediction_market_games/venv/bin"
 EnvironmentFile=/home/ubuntu/prediction_market_games/.env
-ExecStart=/home/ubuntu/prediction_market_games/venv/bin/python /home/ubuntu/prediction_market_games/real_trading_bot.py
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/prediction_market_games/venv/bin/python -u /home/ubuntu/prediction_market_games/real_trading_bot.py
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/prediction_market_games/logs/real_bot.log
@@ -152,11 +153,13 @@ sudo systemctl start real-prediction-bot
 sudo systemctl status real-prediction-bot
 ```
 
-You should see `active (running)`. If you see failed, check:
+You should see `active (running)`. If you see **failed** or **"bad unit file setting"**, check:
 
 ```bash
-journalctl -u real-prediction-bot -n 50 --no-pager
+systemd-analyze verify /etc/systemd/system/real-prediction-bot.service
 ```
+
+That prints the exact invalid line. Fix the unit file (no spaces around `=`, no duplicate `ExecStart`, every directive inside a `[Unit]` or `[Service]` section) and run `sudo systemctl daemon-reload` again.
 
 ---
 
@@ -179,6 +182,49 @@ journalctl -u real-prediction-bot -n 50 --no-pager
    ```
 
 Done. The real bot is funded (Polymarket has your $100), configured for $100, and running with live portfolio logs. It runs in **dry run** by default (no real orders sent until order execution is implemented and you set `dry_run: False`).
+
+---
+
+### If `tail -f .../logs/real_bot.log` shows nothing
+
+Run these on the server to see why:
+
+1. **Is the service running?**
+   ```bash
+   sudo systemctl status real-prediction-bot
+   ```
+   If it says **inactive** or **failed**, the process never started or crashed.
+
+2. **What did the service print (including errors)?**
+   ```bash
+   journalctl -u real-prediction-bot -n 100 --no-pager
+   ```
+   This shows the last 100 lines from the service. Look for Python errors (e.g. missing module, import error, crash in first cycle).
+
+3. **Does the log file exist? Is it empty?**
+   ```bash
+   ls -la ~/prediction_market_games/logs/real_bot.log
+   cat ~/prediction_market_games/logs/real_bot.log
+   ```
+   If the file is missing or empty, the service may be failing before it writes anything, or the `StandardOutput=` path in the unit might be wrong (e.g. typo or different user/home).
+
+4. **Check the error log:**
+   ```bash
+   cat ~/prediction_market_games/logs/real_bot_error.log
+   ```
+
+5. **Run the bot by hand** (same way the service runs) to see errors in the terminal:
+   ```bash
+   cd ~/prediction_market_games
+   source venv/bin/activate
+   python real_trading_bot.py
+   ```
+   Let it run one cycle (about 2 minutes). If it crashes or prints an error, that’s the cause. Press `Ctrl+C` to stop, then fix the error and restart the service:
+   ```bash
+   sudo systemctl restart real-prediction-bot
+   ```
+
+Common causes: **wrong path** in the service file (e.g. repo in a different folder), **venv not activated** in the unit (service uses `venv/bin/python` so venv must exist), **missing dependency** (e.g. `ModuleNotFoundError`), or **permission** (logs dir not writable by `ubuntu`).
 
 ---
 
@@ -269,7 +315,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/prediction_market_games
 Environment="PATH=/home/ubuntu/prediction_market_games/venv/bin"
 EnvironmentFile=/home/ubuntu/prediction_market_games/.env
-ExecStart=/home/ubuntu/prediction_market_games/venv/bin/python /home/ubuntu/prediction_market_games/real_trading_bot.py
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/prediction_market_games/venv/bin/python -u /home/ubuntu/prediction_market_games/real_trading_bot.py
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/prediction_market_games/logs/real_bot.log
@@ -330,15 +377,12 @@ scp -i /path/to/your-key.pem ubuntu@YOUR_SERVER_IP:~/prediction_market_games/dat
 
 ---
 
-## 4. Order Execution Note
+## 4. Real Order Execution (Implemented)
 
-The real bot’s `execute_order` path currently **does not** place live orders on Polymarket (EIP-712 signing and CLOB submission are not implemented). With `dry_run: True` it:
+The real bot places live orders on Polymarket using the official **py-clob-client** (EIP-712 signing and CLOB API). With `dry_run: False` and `POLYMARKET_PRIVATE_KEY` set in `.env`:
 
-- Uses the same entry/exit rules and position sizing.
-- Simulates fills at the current Polymarket price.
-- Updates state and writes **real_bot_state.json** and **real_daily_returns.csv** as if trades had happened.
+- **Entry:** Limit BUY at best ask (GTC).
+- **Exit:** Limit SELL at best bid (GTC), using the position’s shares.
+- Tick size and neg_risk are read from the CLOB per token.
 
-So you can:
-
-- Run the real bot in dry run on the same server with $100 config and get **full live portfolio logs** (state + daily returns + Sharpe + win rate).
-- When you add or integrate real order placement (eIP-712 + Polymarket API), set `dry_run: False` and add your key to `.env` to switch to real $100 execution without changing infrastructure or log locations.
+**Token allowances (MetaMask / EOA):** If you use MetaMask or a hardware wallet (not an email/Magic wallet), you must **set token allowances** once so Polymarket can spend your USDC and conditional tokens. See the [py-clob-client README – Token Allowances](https://github.com/Polymarket/py-clob-client#important-token-allowances-for-metamaskeoa-users). You can set them in the Polymarket UI (approve when prompted) or via the linked example script. Without allowances, orders will be rejected for insufficient balance/allowance.
