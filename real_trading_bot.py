@@ -354,16 +354,27 @@ def execute_order(
         print(f'  [ERROR] No CLOB client (set POLYMARKET_PRIVATE_KEY in .env)')
         return {'success': False, 'reason': 'No CLOB client'}
     
+    # get_tick_size can return dict from API (e.g. {"minimum_tick_size": 0.01}) or a string
     try:
-        tick_size = float(client.get_tick_size(token_id) or 0.01)
+        raw_tick = client.get_tick_size(token_id)
+        if isinstance(raw_tick, dict):
+            tick_size = float(raw_tick.get('minimum_tick_size') or raw_tick.get('tick_size') or 0.01)
+        else:
+            tick_size = float(raw_tick or 0.01)
     except Exception:
         tick_size = 0.01
     try:
-        neg_risk = bool(client.get_neg_risk(token_id))
+        raw_neg = client.get_neg_risk(token_id)
+        neg_risk = bool(
+            raw_neg if not isinstance(raw_neg, dict) else raw_neg.get('neg_risk', False)
+        )
     except Exception:
         neg_risk = False
     
-    options = {'tick_size': str(tick_size), 'neg_risk': neg_risk}
+    # Library expects PartialCreateOrderOptions (object with .tick_size), NOT a dict
+    tick_str = str(tick_size)
+    if tick_str not in ('0.1', '0.01', '0.001', '0.0001'):
+        tick_str = '0.01'
     
     is_sell = shares_to_sell is not None and shares_to_sell > 0
     if is_sell:
@@ -378,7 +389,7 @@ def execute_order(
         print(f'  [REAL] Placing BUY ${size_arg:.2f} @ {price * 100:.1f}%...')
     
     try:
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
         from py_clob_client.order_builder.constants import BUY, SELL
         side_enum = SELL if is_sell else BUY
         order_args = OrderArgs(
@@ -387,7 +398,15 @@ def execute_order(
             size=size_arg,
             side=side_enum,
         )
-        signed = client.create_order(order_args, options=options)
+        options = PartialCreateOrderOptions(tick_size=tick_str, neg_risk=neg_risk)
+        try:
+            signed = client.create_order(order_args, options=options)
+        except AttributeError as ae:
+            if "'dict' object has no attribute 'tick_size'" in str(ae) or "tick_size" in str(ae):
+                # Older code path or wrong type: let the library resolve tick_size/neg_risk
+                signed = client.create_order(order_args, options=None)
+            else:
+                raise
         resp = client.post_order(signed, OrderType.GTC)
     except Exception as e:
         print(f'  [ERROR] Order failed: {e}')
