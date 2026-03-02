@@ -383,7 +383,7 @@ def execute_order(
     if is_sell:
         price = _round_to_tick(book['best_bid'], tick_size)
         order_side = 'SELL'
-        # Round down slightly to avoid selling more shares than we hold (state/partial-fill drift)
+        # On exit we always sell 100% of the position (full shares in state). Size is only constrained on entry.
         size_arg = round(float(shares_to_sell), 4)
         if size_arg <= 0:
             print(f'  [ERROR] Invalid sell size: {shares_to_sell}')
@@ -515,7 +515,9 @@ def run_bot_cycle(state: Dict):
                 if position.get('side') == 'long':
                     position['unrealized_pnl'] = (current_price - entry) * shares
                 else:
-                    position['unrealized_pnl'] = (entry - current_price) * shares
+                    # Short: we hold NO token; its price is 1 - YES_price
+                    current_no = 1.0 - current_price
+                    position['unrealized_pnl'] = (current_no - entry) * shares
             else:
                 position['unrealized_pnl'] = position.get('unrealized_pnl', 0)
         
@@ -524,6 +526,9 @@ def run_bot_cycle(state: Dict):
         # STEP 3: Check for exit signals
         positions_to_exit = []
         for position in state['open_positions']:
+            if position.get('exit_failed'):
+                print(f'  [SKIP] Not retrying exit for "{position["market_question"][:40]}..." (previous: {position.get("exit_failed_reason", "balance/allowance")})')
+                continue
             exit_check = should_exit_position(position, opportunities, CONFIG)
             
             if exit_check['should_exit']:
@@ -534,6 +539,7 @@ def run_bot_cycle(state: Dict):
                 if not opp_exit:
                     print(f'  [WARNING] No opportunity data for position, skipping exit')
                     continue
+                # Sell 100% of the position; size is only considered on entry.
                 result = execute_order(
                     opp_exit,
                     position['side'],
@@ -542,14 +548,22 @@ def run_bot_cycle(state: Dict):
                     shares_to_sell=position.get('shares'),
                 )
                 
+                if not result.get('success'):
+                    reason = result.get('reason', '') or str(result)
+                    if 'not enough balance' in reason.lower() or 'allowance' in reason.lower():
+                        position['exit_failed'] = True
+                        position['exit_failed_reason'] = reason[:200]
+                        print(f'  [WARNING] Exit failed (balance/allowance). Won\'t retry until you fix state or balance and clear position["exit_failed"].')
+                
                 if result.get('success'):
+                    filled_price = result.get('filled_price', exit_check.get('current_price'))
                     usdc_received = result.get('usdc_received', position['size'])
                     pnl = usdc_received - position['size']
                     
                     print(f'  CLOSED: ${usdc_received:.2f} received | P&L: ${pnl:.2f}')
                     
                     position['status'] = 'closed'
-                    position['close_price'] = result.get('filled_price', exit_check.get('current_price'))
+                    position['close_price'] = filled_price
                     position['realized_pnl'] = pnl
                     state['closed_positions'].append(position)
                     positions_to_exit.append(position['id'])
