@@ -189,6 +189,71 @@ def save_state(state: Dict):
         print(f'Error saving state: {e}')
 
 
+def sync_state_from_chain() -> bool:
+    """
+    Rebuild open_positions from on-chain wallet balances. For each crypto market we fetch,
+    check wallet balance for both outcome tokens; if balance > 0, add position with
+    shares from chain and size/entry from current book (so unrealized = 0 at sync time).
+    Preserves starting_balance, total_pnl, win/loss stats. Returns True on success.
+    """
+    wallet = _get_wallet_address()
+    if not wallet:
+        print('  [ERROR] No wallet (POLYMARKET_PRIVATE_KEY not set or invalid)')
+        return False
+    try:
+        result = calculate_arbitrage_opportunities(limit=200)
+        opportunities = result.get('opportunities', [])
+    except Exception as e:
+        print(f'  [ERROR] Failed to fetch opportunities: {e}')
+        return False
+    positions = []
+    for opp in opportunities:
+        market = opp.get('market', {})
+        token_ids = market.get('token_ids', [])
+        if not token_ids or len(token_ids) < 2:
+            continue
+        market_id = market.get('id', '')
+        question = market.get('question', '') or market.get('title', '')
+        for i, token_id in enumerate(token_ids):
+            balance = _get_outcome_token_balance(token_id, wallet)
+            if balance is None or balance < 0.01:
+                continue
+            book = get_order_book(token_id)
+            if not book:
+                continue
+            # Use best_bid as current price (what we'd get if we sold)
+            try:
+                price = float(book.get('best_bid') or book.get('mid') or 0.5)
+            except (TypeError, ValueError):
+                price = 0.5
+            price = max(0.01, min(0.99, price))
+            side = 'long' if i == 0 else 'short'
+            size = round(balance * price, 2)
+            positions.append({
+                'id': f'pos_sync_{int(time.time() * 1000)}_{len(positions)}',
+                'market_id': market_id,
+                'market_question': question,
+                'token_id': str(token_id),
+                'side': side,
+                'entry_price': price,
+                'size': size,
+                'shares': round(balance, 4),
+                'entry_edge': 0,
+                'entry_timestamp': datetime.now().isoformat(),
+                'status': 'open',
+                'current_price': price,
+                'unrealized_pnl': 0,
+            })
+    state = load_state()
+    state['open_positions'] = positions
+    state['current_exposure'] = sum(p['size'] for p in positions)
+    state['current_balance'] = state['starting_balance'] - state['current_exposure'] + state.get('total_pnl', 0)
+    state['last_update'] = datetime.now().isoformat()
+    save_state(state)
+    print(f'  Synced {len(positions)} positions from chain. Exposure: ${state["current_exposure"]:.2f}')
+    return True
+
+
 def get_mark_to_market_equity(state: Dict) -> float:
     """Mark-to-market equity: cash + deployed capital + unrealized P&L."""
     equity = state.get('current_balance', state['starting_balance'])
@@ -594,9 +659,6 @@ def run_bot_cycle(state: Dict):
         # STEP 3: Check for exit signals
         positions_to_exit = []
         for position in state['open_positions']:
-            if position.get('exit_failed'):
-                print(f'  [SKIP] Not retrying exit for "{position["market_question"][:40]}..." (previous: {position.get("exit_failed_reason", "balance/allowance")})')
-                continue
             exit_check = should_exit_position(position, opportunities, CONFIG)
             
             if exit_check['should_exit']:
@@ -618,10 +680,7 @@ def run_bot_cycle(state: Dict):
                 
                 if not result.get('success'):
                     reason = result.get('reason', '') or str(result)
-                    if 'not enough balance' in reason.lower() or 'allowance' in reason.lower():
-                        position['exit_failed'] = True
-                        position['exit_failed_reason'] = reason[:200]
-                        print(f'  [WARNING] Exit failed (balance/allowance). Won\'t retry until you fix state or balance and clear position["exit_failed"].')
+                    print(f'  [WARNING] Exit failed: {reason[:120]}')
                 
                 if result.get('success'):
                     filled_price = result.get('filled_price', exit_check.get('current_price'))
@@ -717,7 +776,17 @@ def run_bot_cycle(state: Dict):
         print(f'🎯 Win Rate: {win_rate_pct:.1f}% ({state.get("winning_trades", 0)}W / {state.get("losing_trades", 0)}L)')
         print(f'📝 Total Trades: {state.get("total_trades", 0)}')
         print(f'📅 Daily Returns: {n_days} days recorded')
-        print(f'{"="*60}\n')
+        print(f'{"="*60}')
+        if state['open_positions']:
+            print(f'\n📋 OPEN POSITIONS:')
+            for i, pos in enumerate(state['open_positions'], 1):
+                pnl = pos.get('unrealized_pnl', 0)
+                pnl_pct = (pnl / pos['size'] * 100) if pos.get('size', 0) > 0 else 0
+                pnl_sign = '+' if pnl >= 0 else ''
+                curr = pos.get('current_price', pos.get('entry_price', 0))
+                print(f'   {i}. {pos.get("market_question", "")[:52]}')
+                print(f'      {pos.get("side", "").upper()} ${pos.get("size", 0):.2f} @ {pos.get("entry_price", 0)*100:.1f}% → {curr*100:.1f}%  P&L: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.1f}%)')
+        print()
         
     except Exception as error:
         print(f'  Error in bot cycle: {error}')
@@ -770,5 +839,10 @@ def start_bot():
         print('State saved.')
 
 if __name__ == '__main__':
+    import sys
+    if '--sync-from-chain' in sys.argv:
+        print('Syncing real bot state from on-chain wallet balances...')
+        ok = sync_state_from_chain()
+        sys.exit(0 if ok else 1)
     start_bot()
 
