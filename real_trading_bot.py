@@ -64,6 +64,9 @@ def _get_clob_client():
 # Scaled from paper $1000: ~1/10 exposure/sizes; same edge rules.
 # ============================================================================
 
+# Polymarket CLOB expects order size in outcome-token (shares), not USDC. Min notional $1.
+POLY_MIN_ORDER_USD = 1.0
+
 CONFIG = {
     'starting_balance': 100,            # Live test capital
     'max_total_exposure': 50,           # Max $50 deployed at once
@@ -268,8 +271,8 @@ def should_enter_position(opp: Dict, state: Dict, config: Dict) -> Dict:
     
     # Calculate position size
     size = calculate_position_size(edge, config, remaining_exposure)
-    if size < 0.50:
-        return {'should_enter': False, 'side': 'long', 'edge': edge, 'size': 0, 'reason': f'Position size ${size:.2f} too small'}
+    if size < POLY_MIN_ORDER_USD:
+        return {'should_enter': False, 'side': 'long', 'edge': edge, 'size': 0, 'reason': f'Position size ${size:.2f} below Polymarket min ${POLY_MIN_ORDER_USD}'}
     
     # Determine side
     side = 'short' if edge > 0 else 'long'
@@ -380,13 +383,25 @@ def execute_order(
     if is_sell:
         price = _round_to_tick(book['best_bid'], tick_size)
         order_side = 'SELL'
-        size_arg = float(shares_to_sell)
+        # Round down slightly to avoid selling more shares than we hold (state/partial-fill drift)
+        size_arg = round(float(shares_to_sell), 4)
+        if size_arg <= 0:
+            print(f'  [ERROR] Invalid sell size: {shares_to_sell}')
+            return {'success': False, 'reason': 'Invalid sell size'}
         print(f'  [REAL] Placing SELL {size_arg:.4f} shares @ {price * 100:.1f}%...')
     else:
         price = _round_to_tick(book['best_ask'], tick_size)
         order_side = 'BUY'
-        size_arg = float(size)
-        print(f'  [REAL] Placing BUY ${size_arg:.2f} @ {price * 100:.1f}%...')
+        # CLOB expects size in outcome tokens (shares). Notional = size * price must be >= $1.
+        size_dollars = float(size)
+        if size_dollars < POLY_MIN_ORDER_USD:
+            print(f'  [ERROR] Order size ${size_dollars:.2f} below Polymarket min ${POLY_MIN_ORDER_USD}')
+            return {'success': False, 'reason': f'Order below min ${POLY_MIN_ORDER_USD}'}
+        if price <= 0:
+            print(f'  [ERROR] Invalid price for BUY: {price}')
+            return {'success': False, 'reason': 'Invalid price'}
+        size_arg = size_dollars / price  # shares to achieve this USDC notional
+        print(f'  [REAL] Placing BUY ${size_dollars:.2f} ({size_arg:.4f} shares) @ {price * 100:.1f}%...')
     
     try:
         from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
