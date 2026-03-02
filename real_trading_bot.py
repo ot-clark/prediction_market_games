@@ -59,6 +59,53 @@ def _get_clob_client():
         print(f'  [ERROR] Failed to create CLOB client: {e}')
         return None
 
+
+def _get_wallet_address() -> Optional[str]:
+    """Derive wallet address from POLYMARKET_PRIVATE_KEY. Returns None if not set or invalid."""
+    key = os.environ.get('POLYMARKET_PRIVATE_KEY', '').strip()
+    if not key or (key.startswith('0x') and len(key) < 66):
+        return None
+    try:
+        from web3 import Web3
+        acc = Web3().eth.account.from_key(key if key.startswith('0x') else '0x' + key)
+        return acc.address
+    except Exception:
+        return None
+
+
+def _get_outcome_token_balance(token_id: str, wallet_address: str) -> Optional[float]:
+    """
+    Return the wallet's outcome-token balance (in shares) for the given token_id
+    by querying the CTF contract on Polygon. Returns None on error or if not available.
+    """
+    try:
+        from web3 import Web3
+        rpc = os.environ.get('POLYGON_RPC_URL', '').strip() or 'https://polygon-rpc.com'
+        w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 10}))
+        try:
+            from web3.middleware import geth_poa_middleware
+            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        except Exception:
+            try:
+                from web3.middleware import ExtraDataToPOAMiddleware
+                w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            except Exception:
+                pass
+        if not w3.is_connected():
+            return None
+        ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=ERC1155_BALANCE_OF_ABI)
+        # token_id from CLOB can be decimal string or int; ERC1155 id is uint256
+        if isinstance(token_id, int):
+            tid = token_id
+        else:
+            s = str(token_id).strip()
+            tid = int(s, 16) if s.startswith('0x') else int(s, 10)
+        raw = ctf.functions.balanceOf(Web3.to_checksum_address(wallet_address), tid).call()
+        return float(raw) / (10 ** CTF_DECIMALS)
+    except Exception:
+        return None
+
+
 # ============================================================================
 # CONFIGURATION - $100 LIVE TEST
 # Scaled from paper $1000: ~1/10 exposure/sizes; same edge rules.
@@ -66,6 +113,12 @@ def _get_clob_client():
 
 # Polymarket CLOB expects order size in outcome-token (shares), not USDC. Min notional $1.
 POLY_MIN_ORDER_USD = 1.0
+
+# CTF (Conditional Token Framework) on Polygon - for reading outcome token balance
+CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045'
+# ERC1155 balanceOf(account, id) - returns raw units; Polymarket uses 6 decimals per share
+ERC1155_BALANCE_OF_ABI = [{'inputs': [{'internalType': 'address', 'name': 'account', 'type': 'address'}, {'internalType': 'uint256', 'name': 'id', 'type': 'uint256'}], 'name': 'balanceOf', 'outputs': [{'internalType': 'uint256', 'name': '', 'type': 'uint256'}], 'stateMutability': 'view', 'type': 'function'}]
+CTF_DECIMALS = 6
 
 CONFIG = {
     'starting_balance': 100,            # Live test capital
@@ -383,11 +436,25 @@ def execute_order(
     if is_sell:
         price = _round_to_tick(book['best_bid'], tick_size)
         order_side = 'SELL'
-        # On exit we always sell 100% of the position (full shares in state). Size is only constrained on entry.
-        size_arg = round(float(shares_to_sell), 4)
+        requested = round(float(shares_to_sell), 4)
+        size_arg = requested
+        # At sell time, use actual wallet balance so we never try to sell more than we hold (e.g. partial fills on buy).
+        wallet = _get_wallet_address()
+        if wallet:
+            balance_shares = _get_outcome_token_balance(token_id, wallet)
+            if balance_shares is not None:
+                if balance_shares < 0.01:
+                    print(f'  [ERROR] Wallet has ~0 shares of this token; nothing to sell')
+                    return {'success': False, 'reason': 'No balance'}
+                if balance_shares < size_arg:
+                    size_arg = round(balance_shares, 4)
+                    print(f'  [INFO] Selling {size_arg:.4f} shares (wallet balance); state had {requested:.4f}')
         if size_arg <= 0:
             print(f'  [ERROR] Invalid sell size: {shares_to_sell}')
             return {'success': False, 'reason': 'Invalid sell size'}
+        if price > 0 and size_arg * price < POLY_MIN_ORDER_USD:
+            print(f'  [ERROR] Sell notional ${size_arg * price:.2f} below min ${POLY_MIN_ORDER_USD}')
+            return {'success': False, 'reason': f'Sell below min notional ${POLY_MIN_ORDER_USD}'}
         print(f'  [REAL] Placing SELL {size_arg:.4f} shares @ {price * 100:.1f}%...')
     else:
         price = _round_to_tick(book['best_ask'], tick_size)
@@ -443,6 +510,7 @@ def execute_order(
             'order_id': order_id,
             'filled_price': filled_price,
             'usdc_received': usdc_received,
+            'sold_shares': size_arg,
         }
     return {
         'success': True,
@@ -539,7 +607,7 @@ def run_bot_cycle(state: Dict):
                 if not opp_exit:
                     print(f'  [WARNING] No opportunity data for position, skipping exit')
                     continue
-                # Sell 100% of the position; size is only considered on entry.
+                # Sell: we pass full position shares; execute_order caps to actual wallet balance and sells that.
                 result = execute_order(
                     opp_exit,
                     position['side'],
@@ -558,7 +626,14 @@ def run_bot_cycle(state: Dict):
                 if result.get('success'):
                     filled_price = result.get('filled_price', exit_check.get('current_price'))
                     usdc_received = result.get('usdc_received', position['size'])
-                    pnl = usdc_received - position['size']
+                    # We may have sold fewer shares than state (capped to wallet balance); close proportionally
+                    sold_shares = result.get('sold_shares')  # set by execute_order when we cap
+                    pos_shares = position.get('shares') or 0
+                    if sold_shares is not None and pos_shares and sold_shares < pos_shares:
+                        size_closed = position['size'] * (sold_shares / pos_shares)
+                    else:
+                        size_closed = position['size']
+                    pnl = usdc_received - size_closed
                     
                     print(f'  CLOSED: ${usdc_received:.2f} received | P&L: ${pnl:.2f}')
                     
@@ -569,7 +644,7 @@ def run_bot_cycle(state: Dict):
                     positions_to_exit.append(position['id'])
                     
                     state['total_pnl'] += pnl
-                    state['current_exposure'] -= position['size']
+                    state['current_exposure'] -= size_closed
                     state['total_trades'] = state.get('total_trades', 0) + 1
                     if pnl > 0:
                         state['winning_trades'] = state.get('winning_trades', 0) + 1
