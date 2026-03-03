@@ -680,9 +680,24 @@ def run_bot_cycle(state: Dict):
                 
                 if not result.get('success'):
                     reason = result.get('reason', '') or str(result)
-                    print(f'  [WARNING] Exit failed: {reason[:120]}')
-                
-                if result.get('success'):
+                    # No liquidity (best bid 0): API rejects price < 0.001. Close position for $0 and book the loss.
+                    if 'min: 0.001' in reason and ('price (0.0)' in reason or 'price (0)' in reason or '0.0)' in reason):
+                        usdc_received = 0.0
+                        size_closed = position['size']
+                        pnl = usdc_received - size_closed
+                        print(f'  CLOSED (no liquidity, cashed out for $0): P&L: ${pnl:.2f}')
+                        position['status'] = 'closed'
+                        position['close_price'] = 0.0
+                        position['realized_pnl'] = pnl
+                        state['closed_positions'].append(position)
+                        positions_to_exit.append(position['id'])
+                        state['total_pnl'] += pnl
+                        state['current_exposure'] -= size_closed
+                        state['total_trades'] = state.get('total_trades', 0) + 1
+                        state['losing_trades'] = state.get('losing_trades', 0) + 1
+                    else:
+                        print(f'  [WARNING] Exit failed: {reason[:120]}')
+                elif result.get('success'):
                     filled_price = result.get('filled_price', exit_check.get('current_price'))
                     usdc_received = result.get('usdc_received', position['size'])
                     # We may have sold fewer shares than state (capped to wallet balance); close proportionally
